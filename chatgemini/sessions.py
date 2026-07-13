@@ -130,6 +130,15 @@ class ConversationStore:
         # terminal whitespace has already been normalized, while user content
         # remains exact.
         with self._connection() as connection:
+            # Load old rows once. Records written by previous releases used a
+            # whitespace-sensitive key, so checking all representations at one
+            # prefix length is important: a shorter modern record must never
+            # win before a longer legacy record is considered.
+            rows = connection.execute(
+                "SELECT upstream_json, messages_json FROM conversation_sessions "
+                "WHERE model = ? ORDER BY updated_at DESC LIMIT ?",
+                (model or "", self.max_rows),
+            ).fetchall()
             for end in range(len(messages) - 1, 0, -1):
                 prefix = messages[:end]
                 key = _history_hash(model, prefix)
@@ -138,27 +147,18 @@ class ConversationStore:
                     "WHERE history_hash = ? AND model = ?",
                     (key, model or ""),
                 ).fetchone()
-                if not row:
-                    continue
-                known = _identity_messages(json.loads(row[1]))
-                if known != prefix:
-                    continue
-                return {
-                    "upstream_state": json.loads(row[0]),
-                    "known_messages": known,
-                    "delta_messages": _clone(original_messages[end:]),
-                }
+                if row:
+                    known = _identity_messages(json.loads(row[1]))
+                    if known == prefix:
+                        return {
+                            "upstream_state": json.loads(row[0]),
+                            "known_messages": known,
+                            "delta_messages": _clone(original_messages[end:]),
+                        }
 
-            # Previous releases keyed records before terminal assistant
-            # whitespace was normalized. Scan bounded, same-model records once
-            # so existing live sessions immediately benefit from the fix.
-            rows = connection.execute(
-                "SELECT upstream_json, messages_json FROM conversation_sessions "
-                "WHERE model = ? ORDER BY updated_at DESC LIMIT ?",
-                (model or "", self.max_rows),
-            ).fetchall()
-            for end in range(len(messages) - 1, 0, -1):
-                prefix = messages[:end]
+                # Previous releases keyed records before terminal assistant
+                # whitespace was normalized. Check those records at the same
+                # prefix length before falling back to an older conversation.
                 for upstream_json, messages_json in rows:
                     known = _identity_messages(json.loads(messages_json))
                     if known != prefix:

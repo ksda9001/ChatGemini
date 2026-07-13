@@ -526,6 +526,45 @@ class StoreTests(unittest.TestCase):
             self.assertEqual(found["upstream_state"], state)
             self.assertEqual(found["delta_messages"], current[-1:])
 
+    def test_store_prefers_long_legacy_match_over_short_modern_match(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            path = str(Path(tmpdir) / "chat.db")
+            store = ConversationStore(path)
+            short = [
+                {"role": "user", "content": "first"},
+                {"role": "assistant", "content": "one"},
+                {"role": "user", "content": "second"},
+                {"role": "assistant", "content": "two"},
+            ]
+            legacy = short + [
+                {"role": "user", "content": "third"},
+                {"role": "assistant", "content": "three\n\n"},
+            ]
+            short_state = {"conversation_id": "short-cid"}
+            long_state = {"conversation_id": "long-cid"}
+            store.save("gemini-3.5-flash", short_state, short)
+            store._init()
+            with sqlite3.connect(path) as connection:
+                connection.execute(
+                    "INSERT INTO conversation_sessions "
+                    "(history_hash, updated_at, model, upstream_json, messages_json) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (
+                        _history_hash("gemini-3.5-flash", legacy),
+                        int(time.time()) + 1,
+                        "gemini-3.5-flash",
+                        json.dumps(long_state),
+                        json.dumps(legacy),
+                    ),
+                )
+            current = legacy[:-1] + [
+                {"role": "assistant", "content": "three"},
+                {"role": "user", "content": "fourth"},
+            ]
+            found = store.find("gemini-3.5-flash", current)
+            self.assertEqual(found["upstream_state"], long_state)
+            self.assertEqual(found["delta_messages"], current[-1:])
+
     def test_store_does_not_relax_user_message_matching(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             store = ConversationStore(str(Path(tmpdir) / "chat.db"))
