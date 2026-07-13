@@ -22,7 +22,7 @@ from chatgemini.messages import (
     messages_to_web_prompt,
     normalize_messages,
 )
-from chatgemini.media import image_markdown, output_deltas
+from chatgemini.media import cache_image_object, image_markdown, output_deltas
 from chatgemini.sessions import ConversationStore
 from chatgemini.webapi_backend import metadata_to_state, state_to_metadata
 
@@ -281,6 +281,20 @@ class MediaTests(unittest.TestCase):
                 "\n\n![generated result](https://images.example/generated.png)",
             ])
             self.assertEqual(asyncio.run(output_deltas(output, seen)), ["done"])
+
+    def test_webapi_cached_image_gets_an_opaque_filename(self):
+        class Image:
+            async def save(self, path, filename):
+                saved = Path(path) / f"20260713_hash_{filename}.jpg"
+                saved.write_bytes(b"jpeg-data")
+                return str(saved)
+
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            with patch.dict(CONFIG, {"media_store_path": str(Path(tmpdir) / "media")}):
+                placeholder = asyncio.run(cache_image_object(Image()))
+                filename = placeholder.rsplit("/", 1)[-1]
+                self.assertRegex(filename, r"^[a-f0-9]{32}\.jpg$")
+                self.assertEqual((Path(tmpdir) / "media" / filename).read_bytes(), b"jpeg-data")
 
 
 class StoreTests(unittest.TestCase):

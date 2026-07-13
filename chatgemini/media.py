@@ -64,13 +64,17 @@ async def cache_image_object(image) -> str:
         directory = _media_directory()
         stem = uuid.uuid4().hex
         saved = await image.save(path=str(directory), filename=stem)
-        filename = Path(saved).name
-        path = directory / filename
-        if not path.is_file() or path.parent.resolve() != directory.resolve():
+        saved_path = Path(saved)
+        if not saved_path.is_file() or saved_path.parent.resolve() != directory.resolve():
             return ""
+        suffix = saved_path.suffix.lower()
+        if not suffix or not suffix[1:].isalnum() or len(suffix) > 9:
+            suffix = ".png"
+        path = directory / f"{stem}{suffix}"
+        saved_path.replace(path)
         os.chmod(path, 0o600)
         _prune_media(directory)
-        return MEDIA_PLACEHOLDER + filename
+        return MEDIA_PLACEHOLDER + path.name
     except Exception:
         return ""
 
