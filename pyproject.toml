@@ -1,0 +1,18 @@
+[project]
+name = "chatgemini"
+version = "1.0.0"
+description = "Stable, chat-only OpenAI-compatible gateway for Gemini Web"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+dependencies = [
+  "httpx>=0.25",
+  "gemini-webapi>=2.0.0,<3"
+]
+
+[project.scripts]
+chatgemini = "chatgemini.__main__:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"

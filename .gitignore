@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.db
+*.db-shm
+*.db-wal
+.venv/
+.env
+config.json
+cookie.txt
+cookie.json
+.idea/
+.DS_Store

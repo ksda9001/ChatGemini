@@ -1,0 +1,13 @@
+services:
+  chatgemini:
+    build: .
+    container_name: chatgemini
+    restart: unless-stopped
+    ports:
+      - "8081:8081"
+    volumes:
+      - ./config.json:/app/config.json:ro
+      - chatgemini-data:/app/data
+
+volumes:
+  chatgemini-data:
