@@ -24,6 +24,7 @@ from .messages import (
 from .media import MEDIA_PLACEHOLDER
 from .models import MODELS, resolve_model
 from .multimodal import fetch_image_bytes, upload_image
+from .richtext import RichTextSanitizer, sanitize_rich_text
 from .sessions import ConversationStore
 
 
@@ -137,6 +138,9 @@ class ChatHandler(BaseHTTPRequestHandler):
         if not isinstance(text, str) or MEDIA_PLACEHOLDER not in text:
             return text
         return text.replace(MEDIA_PLACEHOLDER, self._public_base_url() + "/media/")
+
+    def _render_output_text(self, text):
+        return sanitize_rich_text(self._render_media_urls(text))
 
     def _serve_media(self):
         filename = self.route[len("/media/"):]
@@ -470,7 +474,7 @@ class ChatHandler(BaseHTTPRequestHandler):
             self.send_json({"error": {"message": f"upstream error: {exc}", "type": "upstream_error"}}, 502)
             return
 
-        text = self._render_media_urls(text)
+        text = self._render_output_text(text)
         self._save_turn(model_name, state, messages, text, temporary)
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:20]}"
         self.send_json({
@@ -506,7 +510,7 @@ class ChatHandler(BaseHTTPRequestHandler):
             self.send_google_error(f"upstream error: {exc}", 502)
             return
 
-        text = self._render_media_urls(text)
+        text = self._render_output_text(text)
         self._save_turn(model_name, state, messages, text, temporary)
         usage = _usage(usage_prompt, text)
         self.send_json({
@@ -567,11 +571,14 @@ class ChatHandler(BaseHTTPRequestHandler):
 
             text = ""
             emitted = False
+            sanitizer = RichTextSanitizer()
             try:
                 for delta in self._heartbeat_iter(deltas):
                     if not delta:
                         continue
-                    delta = self._render_media_urls(delta)
+                    delta = sanitizer.feed(self._render_media_urls(delta))
+                    if not delta:
+                        continue
                     emitted = True
                     text += delta
                     self._sse_data(chunk({"content": delta}))
@@ -583,11 +590,20 @@ class ChatHandler(BaseHTTPRequestHandler):
                     full_prompt, model_id, think_mode, file_refs, extra_fields, temporary,
                     fallback_prompt=full_prompt,
                 )
+                sanitizer = RichTextSanitizer()
                 for delta in self._heartbeat_iter(stateful_stream):
                     if delta:
-                        delta = self._render_media_urls(delta)
+                        delta = sanitizer.feed(self._render_media_urls(delta))
+                        if not delta:
+                            continue
                         text += delta
                         self._sse_data(chunk({"content": delta}))
+
+            final_delta = sanitizer.feed(final=True)
+            if final_delta:
+                emitted = True
+                text += final_delta
+                self._sse_data(chunk({"content": final_delta}))
 
             if stateful_stream is not None and getattr(stateful_stream, "state", None):
                 self._save_turn(model_name, stateful_stream.state, messages, text, temporary)
@@ -642,11 +658,14 @@ class ChatHandler(BaseHTTPRequestHandler):
 
             text = ""
             emitted = False
+            sanitizer = RichTextSanitizer()
             try:
                 for delta in self._heartbeat_iter(deltas):
                     if not delta:
                         continue
-                    delta = self._render_media_urls(delta)
+                    delta = sanitizer.feed(self._render_media_urls(delta))
+                    if not delta:
+                        continue
                     emitted = True
                     text += delta
                     self._sse_data({"candidates": [{
@@ -661,14 +680,26 @@ class ChatHandler(BaseHTTPRequestHandler):
                     full_prompt, model_id, think_mode, file_refs, extra_fields, temporary,
                     fallback_prompt=full_prompt,
                 )
+                sanitizer = RichTextSanitizer()
                 for delta in self._heartbeat_iter(stateful_stream):
                     if delta:
-                        delta = self._render_media_urls(delta)
+                        delta = sanitizer.feed(self._render_media_urls(delta))
+                        if not delta:
+                            continue
                         text += delta
                         self._sse_data({"candidates": [{
                             "index": 0,
                             "content": {"role": "model", "parts": [{"text": delta}]},
                         }], "modelVersion": model_name})
+
+            final_delta = sanitizer.feed(final=True)
+            if final_delta:
+                emitted = True
+                text += final_delta
+                self._sse_data({"candidates": [{
+                    "index": 0,
+                    "content": {"role": "model", "parts": [{"text": final_delta}]},
+                }], "modelVersion": model_name})
 
             if stateful_stream is not None and getattr(stateful_stream, "state", None):
                 self._save_turn(model_name, stateful_stream.state, messages, text, temporary)

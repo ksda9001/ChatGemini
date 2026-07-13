@@ -23,6 +23,7 @@ from chatgemini.messages import (
     normalize_messages,
 )
 from chatgemini.media import cache_image_object, image_markdown, output_deltas
+from chatgemini.richtext import RichTextSanitizer, sanitize_rich_text
 from chatgemini.sessions import ConversationStore
 from chatgemini.webapi_backend import GeminiWebAPIBackend, metadata_to_state, state_to_metadata
 
@@ -341,6 +342,52 @@ class WebAPIBackendTests(unittest.TestCase):
                 self.assertTrue(tail_finished.is_set())
 
         asyncio.run(scenario())
+
+
+class RichTextTests(unittest.TestCase):
+    SAMPLE = """<Image alt="Classical painting" caption="恺撒遇刺" src="image_agent_tag_1"/>
+<Timeline>
+{/* Reason: hidden internal note */}
+  <TimelineEvent time="公元41年" title="卡利古拉 (Caligula)">
+    正文内容。
+  </TimelineEvent>
+</Timeline>
+<ElicitationsGroup message="想要深入了解吗？">
+{/* Reason: another hidden note */}
+  <Elicitation label="近卫军" query="详细解释近卫军。"/>
+</ElicitationsGroup>"""
+
+    def test_rich_components_become_markdown(self):
+        text = sanitize_rich_text(self.SAMPLE)
+        self.assertIn("*恺撒遇刺*", text)
+        self.assertIn("### 公元41年 · 卡利古拉 (Caligula)", text)
+        self.assertIn("正文内容。", text)
+        self.assertIn("### 想要深入了解吗？", text)
+        self.assertIn("- **近卫军**：详细解释近卫军。", text)
+        for private_markup in ("<Image", "<Timeline", "</Timeline", "{/*", "<Elicitation"):
+            self.assertNotIn(private_markup, text)
+
+    def test_component_split_across_sse_chunks_does_not_leak(self):
+        sanitizer = RichTextSanitizer()
+        chunks = [
+            "<",
+            "TimelineEv",
+            "ent time='公元41年' title='卡利",
+            "古拉'>正文</Timeline",
+            "Event>",
+        ]
+        text = "".join(sanitizer.feed(chunk) for chunk in chunks)
+        text += sanitizer.feed(final=True)
+        self.assertIn("### 公元41年 · 卡利古拉", text)
+        self.assertIn("正文", text)
+        self.assertNotIn("Timeline", text)
+
+    def test_component_like_text_inside_code_fence_is_preserved(self):
+        source = "```jsx\n<Timeline><TimelineEvent title=\"demo\">\n```"
+        self.assertEqual(sanitize_rich_text(source), source)
+
+    def test_unknown_component_keeps_its_body(self):
+        self.assertEqual(sanitize_rich_text("before <FancyCard>inside</FancyCard> after"), "before inside after")
 
     def test_next_turn_waits_for_previous_tail_drain(self):
         async def scenario():

@@ -33,6 +33,7 @@ The project removes coding-agent protocols, tool-call prompts, function-call par
 - NewAPI and OpenWebUI friendly SSE behavior
 - Heartbeats while Gemini is still thinking
 - Early completion on Gemini's final visible frame, without its idle tail delay
+- Private Gemini rich components converted to portable Markdown
 - Automatic retries for empty upstream responses
 - Automatic continuation for Gemini output-limit error `1155`
 - Optional authenticated Gemini Web sessions
