@@ -231,7 +231,8 @@ Cookie 是账号凭据。不要提交到 Git，不要发到公开 issue，也不
   "api_keys": ["change-this-private-key"],
   "cookie_file": "/app/cookie.json",
   "conversation_store_path": "/app/data/conversations.db",
-  "reuse_upstream_sessions": true
+  "reuse_upstream_sessions": true,
+  "upstream_session_backend": "gemini_webapi"
 }
 ```
 
@@ -252,7 +253,7 @@ docker run -d \
 
 ## 纯聊天会话复用
 
-启用 `reuse_upstream_sessions` 后，ChatGemini 会保存已完成聊天的 Gemini Web metadata。下一次 OpenAI 请求到来时，服务查找完全一致的上一段消息历史，只把新增用户消息发送到同一个 Gemini Web 对话。
+启用 `reuse_upstream_sessions` 后，ChatGemini 会保存已完成聊天的 Gemini Web metadata。下一次 OpenAI 请求到来时，服务查找完全一致的上一段消息历史，只把新增用户消息发送到同一个 Gemini Web 对话。`gemini_webapi` 是默认的会话后端；若它在输出首字前失败，ChatGemini 会自动回退 direct Gemini Web 传输并重建完整上下文，保证这次回复不会丢失。
 
 SQLite 只包含普通对话映射：
 
@@ -286,6 +287,7 @@ conversation_sessions
 | `proxy` | 访问 Google 的 HTTP 代理 | `null` 使用直连/系统网络 |
 | `conversation_store_path` | 纯聊天 SQLite | Docker 中为 `/app/data/conversations.db` |
 | `reuse_upstream_sessions` | 复用 Gemini Web metadata | 默认关闭 |
+| `upstream_session_backend` | 首选上游会话后端 | `gemini_webapi`；direct 传输作为回退 |
 | `max_history_messages` | 最近聊天消息上限 | `60` |
 | `max_history_chars` | prompt 字符近似上限 | `80000` |
 | `sse_heartbeat_sec` | 心跳间隔 | `10` 秒 |

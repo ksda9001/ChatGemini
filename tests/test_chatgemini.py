@@ -12,7 +12,7 @@ from unittest.mock import patch
 import chatgemini.server as server
 from chatgemini.config import CONFIG, DEFAULT_CONFIG
 from chatgemini.cookies import cookie_pairs_from_content
-from chatgemini.gemini import _append_continuation, _was_truncated
+from chatgemini.gemini import DirectStream, _append_continuation, _was_truncated
 from chatgemini.messages import (
     compact_messages,
     google_request_to_messages,
@@ -168,6 +168,40 @@ class MessageTests(unittest.TestCase):
         self.assertIn("hi", prompt)
         self.assertNotIn("shell_command", prompt)
         self.assertNotIn("secret output", prompt)
+
+
+class DirectStreamTests(unittest.TestCase):
+    def test_direct_stream_extracts_conversation_state(self):
+        inner = [None] * 26
+        inner[1] = ["conversation-id", "response-id"]
+        inner[4] = [["choice-id", ["hello"]]]
+        inner[25] = "context"
+        frame = json.dumps([["wrb.fr", None, json.dumps(inner)]]) + "\n"
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def iter_text(self):
+                yield frame[:40]
+                yield frame[40:]
+
+        class Client:
+            def stream(self, *args, **kwargs):
+                return Response()
+
+        with patch("chatgemini.gemini.HAS_HTTPX", True), patch(
+            "chatgemini.gemini._get_httpx_client", return_value=Client()
+        ):
+            stream = DirectStream("hello", 1, 4)
+            self.assertEqual("".join(stream), "hello")
+        self.assertEqual(stream.state["backend"], "direct")
+        self.assertEqual(stream.state["conversation_id"], "conversation-id")
+        self.assertEqual(stream.state["response_id"], "response-id")
+        self.assertEqual(stream.state["choice_id"], "choice-id")
 
 
 class StoreTests(unittest.TestCase):
@@ -394,6 +428,7 @@ class ProtocolTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             harness = HttpHarness(tmpdir, [], reuse=True)
             try:
+                CONFIG["upstream_session_backend"] = "gemini_webapi"
                 with patch("chatgemini.webapi_backend.generate_stream_with_state", side_effect=fake_web_stream):
                     _, _, first_body = harness.request("/v1/chat/completions", {
                         "model": "gemini-3.5-flash",
@@ -414,6 +449,56 @@ class ProtocolTests(unittest.TestCase):
                 self.assertEqual(calls[0][0], "[User]\nremember\n[/User]")
                 self.assertEqual(calls[1][0], "[User]\ncontinue\n[/User]")
                 self.assertEqual(calls[1][2]["conversation_id"], "stream-cid")
+            finally:
+                harness.close()
+
+    def test_stream_direct_conversation_saves_and_resumes(self):
+        class FakeDirectStream:
+            def __init__(self, text, state):
+                self.text = text
+                self.state = state
+
+            def __iter__(self):
+                yield self.text
+
+        state = {
+            "backend": "direct",
+            "conversation_id": "direct-cid",
+            "response_id": "direct-rid",
+            "choice_id": "direct-choice",
+            "metadata": ["direct-cid", "direct-rid", "direct-choice", None, None, None, None, None, None, ""],
+        }
+        calls = []
+
+        def fake_direct_stream(prompt, *args, **kwargs):
+            calls.append((prompt, kwargs))
+            return FakeDirectStream("first" if len(calls) == 1 else "second", state)
+
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            harness = HttpHarness(tmpdir, [], reuse=True)
+            try:
+                CONFIG["upstream_session_backend"] = "direct"
+                with patch("chatgemini.server.generate_stream", side_effect=fake_direct_stream):
+                    _, _, first_body = harness.request("/v1/chat/completions", {
+                        "model": "gemini-3.5-flash",
+                        "messages": [{"role": "user", "content": "remember"}],
+                        "stream": True,
+                    })
+                    _, _, second_body = harness.request("/v1/chat/completions", {
+                        "model": "gemini-3.5-flash",
+                        "messages": [
+                            {"role": "user", "content": "remember"},
+                            {"role": "assistant", "content": "first"},
+                            {"role": "user", "content": "continue"},
+                        ],
+                        "stream": True,
+                    })
+                self.assertIn('"content": "first"', first_body)
+                self.assertIn('"content": "second"', second_body)
+                self.assertEqual(calls[0][0], "[User]\nremember\n[/User]")
+                self.assertEqual(calls[1][0], "[User]\ncontinue\n[/User]")
+                self.assertIsNone(calls[0][1]["conversation"])
+                self.assertEqual(calls[1][1]["conversation"]["conversation_id"], "direct-cid")
             finally:
                 harness.close()
 

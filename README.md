@@ -231,7 +231,8 @@ Example authenticated Docker configuration:
   "api_keys": ["change-this-private-key"],
   "cookie_file": "/app/cookie.json",
   "conversation_store_path": "/app/data/conversations.db",
-  "reuse_upstream_sessions": true
+  "reuse_upstream_sessions": true,
+  "upstream_session_backend": "gemini_webapi"
 }
 ```
 
@@ -252,7 +253,7 @@ If Gemini is opened under an account path such as `/u/1/`, set `auth_user` to `"
 
 ## Plain-chat session reuse
 
-With `reuse_upstream_sessions: true`, ChatGemini saves Gemini Web metadata for completed chat turns. On the next OpenAI request, it finds the exact previous message-history prefix and sends only the new user message to the same Gemini Web conversation.
+With `reuse_upstream_sessions: true`, ChatGemini saves Gemini Web metadata for completed chat turns. On the next OpenAI request, it finds the exact previous message-history prefix and sends only the new user message to the same Gemini Web conversation. `gemini_webapi` is the default session backend; if it fails before producing text, ChatGemini automatically falls back to the direct Gemini Web transport and rebuilds the full chat context so the reply is not lost.
 
 The SQLite database contains only ordinary conversation mappings:
 
@@ -286,6 +287,7 @@ Start with [`config.example.json`](config.example.json).
 | `proxy` | HTTP proxy for Google | `null` uses direct/system networking |
 | `conversation_store_path` | Plain-chat SQLite file | `/app/data/conversations.db` in Docker |
 | `reuse_upstream_sessions` | Reuse Gemini Web metadata | Disabled until explicitly enabled |
+| `upstream_session_backend` | Preferred upstream session backend | `gemini_webapi`; direct transport is the fallback |
 | `max_history_messages` | Maximum recent chat messages | `60` |
 | `max_history_chars` | Approximate prompt character cap | `80000` |
 | `sse_heartbeat_sec` | Keepalive interval | `10` seconds |

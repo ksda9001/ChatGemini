@@ -481,7 +481,7 @@ class ChatHandler(BaseHTTPRequestHandler):
         try:
             self._sse_data(chunk({"role": "assistant", "content": ""}))
             file_refs = _upload_images(images)
-            web_stream = None
+            stateful_stream = None
             use_webapi = (
                 CONFIG.get("reuse_upstream_sessions", False)
                 and CONFIG.get("upstream_session_backend") == "gemini_webapi"
@@ -490,14 +490,17 @@ class ChatHandler(BaseHTTPRequestHandler):
             if use_webapi:
                 from .webapi_backend import generate_stream_with_state
 
-                web_stream = generate_stream_with_state(
+                stateful_stream = generate_stream_with_state(
                     prompt, model_name, state, temporary=temporary
                 )
-                deltas = web_stream
+                deltas = stateful_stream
             else:
-                deltas = generate_stream(
-                    full_prompt, model_id, think_mode, file_refs, extra_fields, temporary
+                stateful_stream = generate_stream(
+                    prompt, model_id, think_mode, file_refs, extra_fields, temporary,
+                    conversation=state,
+                    fallback_prompt=full_prompt,
                 )
+                deltas = stateful_stream
 
             text = ""
             emitted = False
@@ -509,19 +512,20 @@ class ChatHandler(BaseHTTPRequestHandler):
                     text += delta
                     self._sse_data(chunk({"content": delta}))
             except Exception:
-                if emitted or web_stream is None or not CONFIG.get("upstream_session_fallback_direct", True):
+                if emitted or not use_webapi or not CONFIG.get("upstream_session_fallback_direct", True):
                     raise
                 log("Gemini Web stream failed before output; retrying with the direct transport")
-                for delta in self._heartbeat_iter(
-                    generate_stream(full_prompt, model_id, think_mode, file_refs, extra_fields, temporary)
-                ):
+                stateful_stream = generate_stream(
+                    full_prompt, model_id, think_mode, file_refs, extra_fields, temporary,
+                    fallback_prompt=full_prompt,
+                )
+                for delta in self._heartbeat_iter(stateful_stream):
                     if delta:
                         text += delta
                         self._sse_data(chunk({"content": delta}))
-                web_stream = None
 
-            if web_stream is not None and web_stream.state:
-                self._save_turn(model_name, web_stream.state, messages, text, temporary)
+            if stateful_stream is not None and getattr(stateful_stream, "state", None):
+                self._save_turn(model_name, stateful_stream.state, messages, text, temporary)
             self._sse_data(chunk({}, "stop"))
             if include_usage:
                 self._sse_data({
@@ -549,7 +553,7 @@ class ChatHandler(BaseHTTPRequestHandler):
         self._start_sse()
         self.close_connection = True
         file_refs = _upload_images(images)
-        web_stream = None
+        stateful_stream = None
         try:
             use_webapi = (
                 CONFIG.get("reuse_upstream_sessions", False)
@@ -559,14 +563,17 @@ class ChatHandler(BaseHTTPRequestHandler):
             if use_webapi:
                 from .webapi_backend import generate_stream_with_state
 
-                web_stream = generate_stream_with_state(
+                stateful_stream = generate_stream_with_state(
                     prompt, model_name, state, temporary=temporary
                 )
-                deltas = web_stream
+                deltas = stateful_stream
             else:
-                deltas = generate_stream(
-                    full_prompt, model_id, think_mode, file_refs, extra_fields, temporary
+                stateful_stream = generate_stream(
+                    prompt, model_id, think_mode, file_refs, extra_fields, temporary,
+                    conversation=state,
+                    fallback_prompt=full_prompt,
                 )
+                deltas = stateful_stream
 
             text = ""
             emitted = False
@@ -581,22 +588,23 @@ class ChatHandler(BaseHTTPRequestHandler):
                         "content": {"role": "model", "parts": [{"text": delta}]},
                     }], "modelVersion": model_name})
             except Exception:
-                if emitted or web_stream is None or not CONFIG.get("upstream_session_fallback_direct", True):
+                if emitted or not use_webapi or not CONFIG.get("upstream_session_fallback_direct", True):
                     raise
                 log("Gemini Web stream failed before output; retrying with the direct transport")
-                for delta in self._heartbeat_iter(
-                    generate_stream(full_prompt, model_id, think_mode, file_refs, extra_fields, temporary)
-                ):
+                stateful_stream = generate_stream(
+                    full_prompt, model_id, think_mode, file_refs, extra_fields, temporary,
+                    fallback_prompt=full_prompt,
+                )
+                for delta in self._heartbeat_iter(stateful_stream):
                     if delta:
                         text += delta
                         self._sse_data({"candidates": [{
                             "index": 0,
                             "content": {"role": "model", "parts": [{"text": delta}]},
                         }], "modelVersion": model_name})
-                web_stream = None
 
-            if web_stream is not None and web_stream.state:
-                self._save_turn(model_name, web_stream.state, messages, text, temporary)
+            if stateful_stream is not None and getattr(stateful_stream, "state", None):
+                self._save_turn(model_name, stateful_stream.state, messages, text, temporary)
             usage = _usage(prompt, text)
             self._sse_data({
                 "candidates": [{

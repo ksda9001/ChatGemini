@@ -490,6 +490,122 @@ def generate(
     return text
 
 
+class DirectStream:
+    """Direct Gemini Web stream that exposes the completed conversation state."""
+
+    def __init__(
+        self,
+        prompt: str,
+        model_id: int,
+        think_mode: int,
+        file_refs: list = None,
+        extra_fields: dict = None,
+        temporary: bool = False,
+        conversation: dict = None,
+        fallback_prompt: str = None,
+    ):
+        self.prompt = prompt
+        self.model_id = model_id
+        self.think_mode = think_mode
+        self.file_refs = file_refs
+        self.extra_fields = extra_fields
+        self.temporary = temporary
+        self.conversation = conversation
+        self.fallback_prompt = fallback_prompt
+        self.state = None
+
+    def __iter__(self):
+        if not HAS_HTTPX:
+            text, self.state, _ = generate_with_state(
+                self.prompt,
+                self.model_id,
+                self.think_mode,
+                self.file_refs,
+                self.extra_fields,
+                self.conversation,
+                self.fallback_prompt,
+                temporary=self.temporary,
+                allow_webapi=False,
+            )
+            if text:
+                yield text
+            return
+
+        active_prompt = self.prompt
+        active_conversation = self.conversation
+        retries = max(1, int(CONFIG.get("retry_attempts", 3) or 3))
+        last_err = None
+        for attempt in range(retries):
+            emitted_text = ""
+            truncated = False
+            raw_lines = []
+            try:
+                body = _build_payload(
+                    active_prompt,
+                    self.model_id,
+                    self.think_mode,
+                    self.file_refs,
+                    self.extra_fields,
+                    active_conversation,
+                    self.temporary,
+                )
+                client = _get_httpx_client()
+                with client.stream("POST", _get_url(), content=body, headers=_build_headers()) as resp:
+                    buf = ""
+                    for chunk in resp.iter_text():
+                        buf += chunk
+                        while "\n" in buf:
+                            line, buf = buf.split("\n", 1)
+                            raw_lines.append(line + "\n")
+                            _raise_for_bard_error(line)
+                            truncated = truncated or _was_truncated(line)
+                            for text in _extract_texts_from_line(line):
+                                next_text = _merge_text_segments([emitted_text, text])
+                                if len(next_text) <= len(emitted_text):
+                                    continue
+                                delta = clean_text(next_text[len(emitted_text):])
+                                if delta:
+                                    yield delta
+                                emitted_text = next_text
+                    if buf:
+                        raw_lines.append(buf)
+
+                if not emitted_text:
+                    raise RuntimeError("Gemini upstream returned an empty response")
+                self.state = _extract_conversation_state("".join(raw_lines)) or None
+                if truncated:
+                    log("Upstream stream truncated; requesting continuation")
+                    continuation, _, continuation_state = _request_text(
+                        _continuation_prompt(active_prompt, emitted_text),
+                        self.model_id,
+                        self.think_mode,
+                        self.file_refs,
+                        self.extra_fields,
+                        self.state,
+                        self.temporary,
+                    )
+                    completed = _append_continuation(emitted_text, continuation)
+                    delta = completed[len(emitted_text):]
+                    if delta:
+                        yield delta
+                    if continuation_state:
+                        self.state = continuation_state
+                return
+            except Exception as exc:
+                last_err = exc
+                if emitted_text:
+                    raise
+                if active_conversation and self.fallback_prompt:
+                    log(f"Gemini conversation resume failed; rebuilding context: {exc}")
+                    active_conversation = None
+                    active_prompt = self.fallback_prompt
+                    continue
+                if attempt < retries - 1:
+                    log(f"Stream retry {attempt + 1}/{retries}: {exc}")
+                    time.sleep(CONFIG["retry_delay_sec"])
+        raise last_err
+
+
 def generate_stream(
     prompt: str,
     model_id: int,
@@ -497,64 +613,17 @@ def generate_stream(
     file_refs: list = None,
     extra_fields: dict = None,
     temporary: bool = False,
+    conversation: dict = None,
+    fallback_prompt: str = None,
 ):
-    """Streaming generation via httpx with retry on connection failure."""
-    if not HAS_HTTPX:
-        text = generate(prompt, model_id, think_mode, file_refs, extra_fields, temporary)
-        if text:
-            yield text
-        return
-
-    body = _build_payload(
-        prompt, model_id, think_mode, file_refs, extra_fields, temporary=temporary
+    """Stream direct Gemini Web output and retain metadata for the next turn."""
+    return DirectStream(
+        prompt,
+        model_id,
+        think_mode,
+        file_refs,
+        extra_fields,
+        temporary,
+        conversation,
+        fallback_prompt,
     )
-    url = _get_url()
-    headers = _build_headers()
-    client = _get_httpx_client()
-
-    last_err = None
-    for attempt in range(CONFIG["retry_attempts"]):
-        try:
-            emitted_text = ""
-            truncated = False
-            with client.stream("POST", url, content=body, headers=headers) as resp:
-                buf = ""
-                for chunk in resp.iter_text():
-                    buf += chunk
-                    while "\n" in buf:
-                        line, buf = buf.split("\n", 1)
-                        _raise_for_bard_error(line)
-                        truncated = truncated or _was_truncated(line)
-                        for t in _extract_texts_from_line(line):
-                            next_text = _merge_text_segments([emitted_text, t])
-                            if len(next_text) <= len(emitted_text):
-                                continue
-                            delta = clean_text(next_text[len(emitted_text):])
-                            if delta:
-                                yield delta
-                            emitted_text = next_text
-            if not emitted_text:
-                raise RuntimeError("Gemini upstream returned an empty response")
-            if truncated:
-                log("Upstream stream truncated; requesting continuation")
-                continuation = generate(
-                    _continuation_prompt(prompt, emitted_text),
-                    model_id,
-                    think_mode,
-                    file_refs,
-                    extra_fields,
-                    temporary,
-                )
-                completed = _append_continuation(emitted_text, continuation)
-                delta = completed[len(emitted_text):]
-                if delta:
-                    yield delta
-            return
-        except Exception as e:
-            last_err = e
-            if emitted_text:
-                raise
-            if attempt < CONFIG["retry_attempts"] - 1:
-                log(f"Stream retry {attempt+1}/{CONFIG['retry_attempts']}: {e}")
-                time.sleep(CONFIG["retry_delay_sec"])
-    raise last_err
