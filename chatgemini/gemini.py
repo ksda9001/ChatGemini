@@ -17,6 +17,7 @@ except ImportError:
 
 from .config import CONFIG
 from .cookies import cookie_header, load_cookie_pairs
+from .media import image_markdown
 
 _ssl_ctx = None
 _cookie_cache = {"str": "", "sapisid": None, "mtime": 0, "expires_at": None}
@@ -267,6 +268,54 @@ def _extract_texts_from_line(line: str) -> list:
         return []
 
 
+def _nested(value, path, default=None):
+    try:
+        for key in path:
+            value = value[key]
+        return value
+    except (IndexError, KeyError, TypeError):
+        return default
+
+
+def _extract_images_from_line(line: str) -> list:
+    """Extract generated and web image metadata from one Gemini response frame."""
+    if '"wrb.fr"' not in line:
+        return []
+    try:
+        outer = json.loads(line)
+        inner_json = outer[0][2]
+        inner = json.loads(inner_json) if inner_json else None
+    except (json.JSONDecodeError, IndexError, TypeError):
+        return []
+    candidates = _nested(inner, [4], [])
+    if not isinstance(candidates, list):
+        return []
+
+    images = []
+    for candidate in candidates:
+        web_items = _nested(candidate, [12, 1], [])
+        if isinstance(web_items, list):
+            for item in web_items:
+                url = _nested(item, [0, 0, 0], "")
+                if url:
+                    images.append((url, _nested(item, [0, 4], ""), "Gemini image"))
+
+        generated_items = _nested(candidate, [12, 7, 0], [])
+        image_to_image = _nested(candidate, [12, 0, "8", 0], [])
+        for group in (generated_items, image_to_image):
+            if not isinstance(group, list):
+                continue
+            for item in group:
+                url = _nested(item, [0, 3, 3], "")
+                if url:
+                    images.append((
+                        url,
+                        _nested(item, [0, 3, 2], ""),
+                        "Generated image",
+                    ))
+    return images
+
+
 def _merge_text_segments(texts: list) -> str:
     """Merge Gemini text segments that may be cumulative or independent chunks."""
     merged = ""
@@ -290,9 +339,22 @@ def extract_response_text(raw: str) -> str:
     """Parse full response to get final text."""
     _raise_for_bard_error(raw)
     texts = []
+    images = []
+    seen_images = set()
     for line in raw.split("\n"):
         texts.extend(_extract_texts_from_line(line))
-    return clean_text(_merge_text_segments(texts))
+        for url, alt, title in _extract_images_from_line(line):
+            if url in seen_images:
+                continue
+            markdown = image_markdown(url, alt, title)
+            if markdown:
+                seen_images.add(url)
+                images.append(markdown)
+    text = clean_text(_merge_text_segments(texts))
+    if images:
+        text = f"{text}\n\n" if text else ""
+        text += "\n\n".join(images)
+    return text
 
 
 def _continuation_prompt(original_prompt: str, partial_text: str) -> str:
@@ -537,6 +599,8 @@ class DirectStream:
         last_err = None
         for attempt in range(retries):
             emitted_text = ""
+            emitted_images = set()
+            emitted_any = False
             truncated = False
             raw_lines = []
             try:
@@ -565,12 +629,21 @@ class DirectStream:
                                     continue
                                 delta = clean_text(next_text[len(emitted_text):])
                                 if delta:
+                                    emitted_any = True
                                     yield delta
                                 emitted_text = next_text
+                            for url, alt, title in _extract_images_from_line(line):
+                                if url in emitted_images:
+                                    continue
+                                markdown = image_markdown(url, alt, title)
+                                if markdown:
+                                    emitted_images.add(url)
+                                    emitted_any = True
+                                    yield f"\n\n{markdown}"
                     if buf:
                         raw_lines.append(buf)
 
-                if not emitted_text:
+                if not emitted_any:
                     raise RuntimeError("Gemini upstream returned an empty response")
                 self.state = _extract_conversation_state("".join(raw_lines)) or None
                 if truncated:

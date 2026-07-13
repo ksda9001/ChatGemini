@@ -9,6 +9,7 @@ from concurrent.futures import Future, TimeoutError as FutureTimeoutError
 
 from .config import CONFIG
 from .cookies import load_cookie_pairs
+from .media import output_deltas
 
 try:
     from gemini_webapi import GeminiClient
@@ -282,9 +283,10 @@ class GeminiWebAPIBackend:
         # the same Web endpoint but completes reliably, so collect its deltas
         # for callers that need one complete non-streaming chat response.
         text = ""
+        seen_images = set()
         async for output in chat.send_message_stream(prompt, temporary=temporary):
-            if output.text_delta:
-                text += output.text_delta
+            for delta in output_deltas(output, seen_images):
+                text += delta
         return text, metadata_to_state(chat.metadata)
 
     async def _stream(
@@ -298,9 +300,10 @@ class GeminiWebAPIBackend:
         try:
             client = await self._ensure_client()
             chat = _start_isolated_chat(client, self._model(client, model_name), state)
+            seen_images = set()
             async for output in chat.send_message_stream(prompt, temporary=temporary):
-                if output.text_delta:
-                    result._queue.put(("delta", output.text_delta))
+                for delta in output_deltas(output, seen_images):
+                    result._queue.put(("delta", delta))
             result.state = metadata_to_state(chat.metadata)
             result._queue.put(("done", None))
         except BaseException as exc:

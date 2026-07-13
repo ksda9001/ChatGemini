@@ -38,6 +38,7 @@ The project removes coding-agent protocols, tool-call prompts, function-call par
 - Plain-chat conversation reuse backed by one small SQLite table
 - OpenWebUI title, tag, and follow-up requests sent as temporary chats
 - Optional image input through OpenAI multimodal message content
+- Generated and web images returned as Markdown image content
 - Docker, Podman, and native Python deployment
 
 ## Intentionally not supported
@@ -324,6 +325,7 @@ Enable `reuse_upstream_sessions`, persist `/app/data`, and make sure the cookie 
 - Real Pro access depends on account eligibility, not merely having a cookie.
 - Rate limits and risk controls still apply.
 - Image upload depends on the authenticated Gemini Web upload path and may be less reliable than text.
+- Returned images use Gemini's Google-hosted URLs; availability remains controlled by Google.
 - ChatGemini is not a substitute for an official Google API when contractual stability is required.
 
 ## Development

@@ -7,6 +7,7 @@ import unittest
 import urllib.error
 import urllib.request
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import chatgemini.server as server
@@ -20,6 +21,7 @@ from chatgemini.messages import (
     messages_to_web_prompt,
     normalize_messages,
 )
+from chatgemini.media import image_markdown, output_deltas
 from chatgemini.sessions import ConversationStore
 from chatgemini.webapi_backend import metadata_to_state, state_to_metadata
 
@@ -219,6 +221,60 @@ class DirectStreamTests(unittest.TestCase):
         self.assertEqual(stream.state["conversation_id"], "conversation-id")
         self.assertEqual(stream.state["response_id"], "response-id")
         self.assertEqual(stream.state["choice_id"], "choice-id")
+
+    def test_generated_image_only_response_is_not_empty(self):
+        inner = [None] * 26
+        inner[1] = ["conversation-id", "response-id"]
+        candidate = [None] * 13
+        candidate[0] = "choice-id"
+        candidate[1] = [""]
+        media = [None] * 8
+        generated = [[None, None, None, [None, None, "a red circle", "https://images.example/red.png"]]]
+        media[7] = [[generated]]
+        candidate[12] = media
+        inner[4] = [candidate]
+        frame = json.dumps([["wrb.fr", None, json.dumps(inner)]]) + "\n"
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def iter_text(self):
+                yield frame
+
+        class Client:
+            def stream(self, *args, **kwargs):
+                return Response()
+
+        with patch("chatgemini.gemini.HAS_HTTPX", True), patch(
+            "chatgemini.gemini._get_httpx_client", return_value=Client()
+        ):
+            stream = DirectStream("draw", 1, 4)
+            result = "".join(stream)
+        self.assertIn("![a red circle](https://images.example/red.png)", result)
+        self.assertEqual(stream.state["conversation_id"], "conversation-id")
+
+
+class MediaTests(unittest.TestCase):
+    def test_image_markdown_rejects_non_http_urls(self):
+        self.assertEqual(image_markdown("javascript:alert(1)"), "")
+
+    def test_webapi_output_forwards_each_image_once(self):
+        image = SimpleNamespace(
+            url="https://images.example/generated.png",
+            alt="generated result",
+            title="[Generated Image 0]",
+        )
+        output = SimpleNamespace(text_delta="done", images=[image])
+        seen = set()
+        self.assertEqual(output_deltas(output, seen), [
+            "done",
+            "\n\n![generated result](https://images.example/generated.png)",
+        ])
+        self.assertEqual(output_deltas(output, seen), ["done"])
 
 
 class StoreTests(unittest.TestCase):
