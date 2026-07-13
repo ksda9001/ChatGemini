@@ -17,6 +17,7 @@ from chatgemini.messages import (
     compact_messages,
     google_request_to_messages,
     messages_to_prompt,
+    messages_to_web_prompt,
     normalize_messages,
 )
 from chatgemini.sessions import ConversationStore
@@ -147,6 +148,22 @@ class MessageTests(unittest.TestCase):
         )
         self.assertLess(len(compacted[0]["content"]), 180)
         self.assertIn("TAIL", compacted[0]["content"])
+
+    def test_web_prompt_preserves_a_plain_user_turn(self):
+        prompt, _ = messages_to_web_prompt([{"role": "user", "content": "666"}])
+        self.assertEqual(prompt, "666")
+        self.assertNotIn("[User]", prompt)
+
+    def test_web_prompt_keeps_context_without_protocol_delimiters(self):
+        prompt, _ = messages_to_web_prompt([
+            {"role": "system", "content": "be concise"},
+            {"role": "user", "content": "remember blue"},
+            {"role": "assistant", "content": "remembered"},
+            {"role": "user", "content": "what color?"},
+        ])
+        self.assertTrue(prompt.endswith("what color?"))
+        self.assertNotIn("[User]", prompt)
+        self.assertNotIn("[/Assistant]", prompt)
 
     def test_google_message_normalization_discards_function_protocol(self):
         messages = google_request_to_messages({
@@ -446,8 +463,8 @@ class ProtocolTests(unittest.TestCase):
                     })
                 self.assertIn('"content": "first"', first_body)
                 self.assertIn('"content": "second"', second_body)
-                self.assertEqual(calls[0][0], "[User]\nremember\n[/User]")
-                self.assertEqual(calls[1][0], "[User]\ncontinue\n[/User]")
+                self.assertEqual(calls[0][0], "remember")
+                self.assertEqual(calls[1][0], "continue")
                 self.assertEqual(calls[1][2]["conversation_id"], "stream-cid")
             finally:
                 harness.close()

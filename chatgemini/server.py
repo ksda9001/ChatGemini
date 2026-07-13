@@ -15,6 +15,7 @@ from .messages import (
     compact_messages,
     google_request_to_messages,
     messages_to_prompt,
+    messages_to_web_prompt,
     serializable_messages,
 )
 from .models import MODELS, resolve_model
@@ -164,9 +165,16 @@ class ChatHandler(BaseHTTPRequestHandler):
             int(CONFIG.get("max_history_chars", 80000) or 80000),
         )
         full_prompt, images = messages_to_prompt(messages)
+        web_prompt, _ = messages_to_web_prompt(messages)
         stored_messages = serializable_messages(messages)
         temporary = _is_background_request(full_prompt)
-        prompt = full_prompt
+        prefer_web_session = bool(
+            CONFIG.get("reuse_upstream_sessions", False)
+            and CONFIG.get("upstream_session_backend") == "gemini_webapi"
+            and not images
+            and not temporary
+        )
+        prompt = web_prompt if prefer_web_session else full_prompt
         upstream_state = None
         resumed = False
 
@@ -174,7 +182,8 @@ class ChatHandler(BaseHTTPRequestHandler):
             try:
                 session = _store().find(model_name, stored_messages)
                 if session:
-                    delta_prompt, _ = messages_to_prompt(session["delta_messages"])
+                    render_prompt = messages_to_web_prompt if prefer_web_session else messages_to_prompt
+                    delta_prompt, _ = render_prompt(session["delta_messages"])
                     if delta_prompt.strip():
                         prompt = delta_prompt
                         upstream_state = session["upstream_state"]

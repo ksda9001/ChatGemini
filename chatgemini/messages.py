@@ -159,6 +159,53 @@ def messages_to_prompt(messages: list) -> tuple:
     return "\n\n".join(sections), images
 
 
+def messages_to_web_prompt(messages: list) -> tuple:
+    """Render a human-readable prompt for a persistent Gemini Web chat.
+
+    The Web UI displays the exact prompt supplied to its chat endpoint. For a
+    normal user turn, preserve that text exactly instead of exposing the role
+    delimiters used by the direct-transport fallback.
+    """
+    images = []
+    system_messages = []
+    conversation = []
+    for message in messages or []:
+        role = message.get("role", "user")
+        content = message.get("content", "")
+        images.extend(message.get("_images") or [])
+        if not content:
+            continue
+        if role in ("system", "developer"):
+            system_messages.append(content)
+        else:
+            conversation.append((role, content))
+
+    if not conversation:
+        return "\n\n".join(system_messages), images
+
+    latest_role, latest_content = conversation[-1]
+    if len(conversation) == 1 and latest_role == "user" and not system_messages:
+        return latest_content, images
+
+    sections = []
+    if system_messages:
+        sections.append("Instructions for this chat:\n" + "\n\n".join(system_messages))
+
+    earlier = conversation[:-1] if latest_role == "user" else conversation
+    if earlier:
+        transcript = []
+        for role, content in earlier:
+            label = "Earlier assistant reply" if role == "assistant" else "Earlier user message"
+            transcript.append(f"{label}:\n{content}")
+        sections.append("Conversation context:\n" + "\n\n".join(transcript))
+
+    if latest_role == "user":
+        sections.append(latest_content)
+    elif not sections:
+        sections.append(latest_content)
+    return "\n\n".join(sections), images
+
+
 def serializable_messages(messages: list) -> list:
     """Remove request-only binary image values before hashing or SQLite storage."""
     result = []
