@@ -24,7 +24,7 @@ from chatgemini.messages import (
 )
 from chatgemini.media import cache_image_object, image_markdown, output_deltas
 from chatgemini.richtext import RichTextSanitizer, sanitize_rich_text
-from chatgemini.sessions import ConversationStore
+from chatgemini.sessions import ConversationStore, _history_hash
 from chatgemini.webapi_backend import GeminiWebAPIBackend, metadata_to_state, state_to_metadata
 
 
@@ -476,6 +476,69 @@ class StoreTests(unittest.TestCase):
             found = store.find("gemini-3.5-flash", current)
             self.assertEqual(found["upstream_state"], state)
             self.assertEqual(found["delta_messages"], current[-1:])
+
+    def test_store_ignores_terminal_assistant_whitespace(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            store = ConversationStore(str(Path(tmpdir) / "chat.db"))
+            state = {"conversation_id": "cid"}
+            saved = [
+                {"role": "user", "content": "question"},
+                {"role": "assistant", "content": "answer\n\n"},
+            ]
+            current = [
+                {"role": "user", "content": "question"},
+                {"role": "assistant", "content": "answer"},
+                {"role": "user", "content": "follow up"},
+            ]
+            store.save("gemini-3.5-flash", state, saved)
+            found = store.find("gemini-3.5-flash", current)
+            self.assertEqual(found["upstream_state"], state)
+            self.assertEqual(found["delta_messages"], current[-1:])
+
+    def test_store_reads_legacy_whitespace_sensitive_record(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            path = str(Path(tmpdir) / "chat.db")
+            store = ConversationStore(path)
+            legacy = [
+                {"role": "user", "content": "question"},
+                {"role": "assistant", "content": "answer\n\n"},
+            ]
+            state = {"conversation_id": "legacy-cid"}
+            store._init()
+            with sqlite3.connect(path) as connection:
+                connection.execute(
+                    "INSERT INTO conversation_sessions "
+                    "(history_hash, updated_at, model, upstream_json, messages_json) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (
+                        _history_hash("gemini-3.5-flash", legacy),
+                        int(time.time()),
+                        "gemini-3.5-flash",
+                        json.dumps(state),
+                        json.dumps(legacy),
+                    ),
+                )
+            current = legacy[:-1] + [
+                {"role": "assistant", "content": "answer"},
+                {"role": "user", "content": "follow up"},
+            ]
+            found = store.find("gemini-3.5-flash", current)
+            self.assertEqual(found["upstream_state"], state)
+            self.assertEqual(found["delta_messages"], current[-1:])
+
+    def test_store_does_not_relax_user_message_matching(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            store = ConversationStore(str(Path(tmpdir) / "chat.db"))
+            store.save("gemini-3.5-flash", {"conversation_id": "cid"}, [
+                {"role": "user", "content": "question\n\n"},
+                {"role": "assistant", "content": "answer"},
+            ])
+            found = store.find("gemini-3.5-flash", [
+                {"role": "user", "content": "question"},
+                {"role": "assistant", "content": "answer"},
+                {"role": "user", "content": "follow up"},
+            ])
+            self.assertEqual(found, {})
 
 
 class ProtocolTests(unittest.TestCase):

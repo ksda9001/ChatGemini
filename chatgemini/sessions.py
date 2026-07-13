@@ -22,6 +22,26 @@ def _history_hash(model: str, messages: list) -> str:
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
+def _identity_messages(messages: list) -> list:
+    """Normalize only client-side presentation noise used for cache identity.
+
+    OpenWebUI trims terminal whitespace from assistant Markdown before it sends
+    the next request. Gemini may emit one or more final newlines, so treating
+    those bytes as conversation identity makes an otherwise identical history
+    miss its saved upstream Web session. User messages remain byte-for-byte
+    intact: only terminal whitespace in assistant output is presentation noise.
+    """
+    normalized = []
+    for message in messages or []:
+        if not isinstance(message, dict):
+            continue
+        item = _clone(message)
+        if item.get("role") == "assistant" and isinstance(item.get("content"), str):
+            item["content"] = item["content"].rstrip()
+        normalized.append(item)
+    return normalized
+
+
 class ConversationStore:
     def __init__(self, path: str, ttl_sec: int = 86400, max_rows: int = 2000):
         self.path = path
@@ -82,6 +102,7 @@ class ConversationStore:
             return
         self._init()
         now = int(time.time())
+        messages = _identity_messages(messages)
         encoded_messages = json.dumps(messages, ensure_ascii=False)
         with self._lock:
             with self._connection() as connection:
@@ -103,24 +124,48 @@ class ConversationStore:
         if len(messages or []) < 2:
             return {}
         self._init()
-        # A saved turn is an exact prefix of the next OpenAI request.
-        for end in range(len(messages) - 1, 0, -1):
-            prefix = messages[:end]
-            key = _history_hash(model, prefix)
-            with self._connection() as connection:
+        original_messages = _clone(messages)
+        messages = _identity_messages(messages)
+        # A saved turn is an exact prefix of the next OpenAI request. Assistant
+        # terminal whitespace has already been normalized, while user content
+        # remains exact.
+        with self._connection() as connection:
+            for end in range(len(messages) - 1, 0, -1):
+                prefix = messages[:end]
+                key = _history_hash(model, prefix)
                 row = connection.execute(
                     "SELECT upstream_json, messages_json FROM conversation_sessions "
                     "WHERE history_hash = ? AND model = ?",
                     (key, model or ""),
                 ).fetchone()
-            if not row:
-                continue
-            known = json.loads(row[1])
-            if known != prefix:
-                continue
-            return {
-                "upstream_state": json.loads(row[0]),
-                "known_messages": known,
-                "delta_messages": _clone(messages[end:]),
-            }
+                if not row:
+                    continue
+                known = _identity_messages(json.loads(row[1]))
+                if known != prefix:
+                    continue
+                return {
+                    "upstream_state": json.loads(row[0]),
+                    "known_messages": known,
+                    "delta_messages": _clone(original_messages[end:]),
+                }
+
+            # Previous releases keyed records before terminal assistant
+            # whitespace was normalized. Scan bounded, same-model records once
+            # so existing live sessions immediately benefit from the fix.
+            rows = connection.execute(
+                "SELECT upstream_json, messages_json FROM conversation_sessions "
+                "WHERE model = ? ORDER BY updated_at DESC LIMIT ?",
+                (model or "", self.max_rows),
+            ).fetchall()
+            for end in range(len(messages) - 1, 0, -1):
+                prefix = messages[:end]
+                for upstream_json, messages_json in rows:
+                    known = _identity_messages(json.loads(messages_json))
+                    if known != prefix:
+                        continue
+                    return {
+                        "upstream_state": json.loads(upstream_json),
+                        "known_messages": known,
+                        "delta_messages": _clone(original_messages[end:]),
+                    }
         return {}
