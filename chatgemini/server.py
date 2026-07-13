@@ -1,6 +1,9 @@
 """Small OpenAI-compatible HTTP server for ordinary chat only."""
 import json
+import mimetypes
+import os
 import queue
+import re
 import threading
 import time
 import uuid
@@ -18,6 +21,7 @@ from .messages import (
     messages_to_web_prompt,
     serializable_messages,
 )
+from .media import MEDIA_PLACEHOLDER
 from .models import MODELS, resolve_model
 from .multimodal import fetch_image_bytes, upload_image
 from .sessions import ConversationStore
@@ -117,6 +121,51 @@ class ChatHandler(BaseHTTPRequestHandler):
             "status": google_status,
         }}, status)
 
+    def _public_base_url(self):
+        configured = str(CONFIG.get("public_base_url") or "").strip().rstrip("/")
+        if configured.startswith(("http://", "https://")):
+            return configured
+        forwarded_proto = self.headers.get("X-Forwarded-Proto", "").split(",", 1)[0].strip()
+        scheme = forwarded_proto if forwarded_proto in ("http", "https") else "http"
+        forwarded_host = self.headers.get("X-Forwarded-Host", "").split(",", 1)[0].strip()
+        host = forwarded_host or self.headers.get("Host", "")
+        if not re.fullmatch(r"[A-Za-z0-9.:[\]-]+", host or ""):
+            host = f"127.0.0.1:{CONFIG.get('port', 8081)}"
+        return f"{scheme}://{host}"
+
+    def _render_media_urls(self, text):
+        if not isinstance(text, str) or MEDIA_PLACEHOLDER not in text:
+            return text
+        return text.replace(MEDIA_PLACEHOLDER, self._public_base_url() + "/media/")
+
+    def _serve_media(self):
+        filename = self.route[len("/media/"):]
+        if not re.fullmatch(r"[A-Fa-f0-9]{32}\.[A-Za-z0-9]{1,8}", filename):
+            self.send_json({"error": {"message": "not found", "type": "not_found_error"}}, 404)
+            return
+        directory = os.path.abspath(CONFIG.get("media_store_path") or "/app/data/media")
+        path = os.path.abspath(os.path.join(directory, filename))
+        if os.path.dirname(path) != directory or not os.path.isfile(path):
+            self.send_json({"error": {"message": "not found", "type": "not_found_error"}}, 404)
+            return
+        try:
+            size = os.path.getsize(path)
+            self.send_response(200)
+            self.send_header("Content-Type", mimetypes.guess_type(path)[0] or "application/octet-stream")
+            self.send_header("Content-Length", str(size))
+            self.send_header("Cache-Control", "private, max-age=86400, immutable")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            with open(path, "rb") as file:
+                while True:
+                    chunk = file.read(64 * 1024)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+        except (OSError, BrokenPipeError, ConnectionResetError):
+            return
+
     def _start_sse(self):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
@@ -213,6 +262,9 @@ class ChatHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
+        if self.route.startswith("/media/"):
+            self._serve_media()
+            return
         if self.route.startswith(("/v1/", "/v1beta/")) and not self._authorized():
             self.close_connection = True
             if self.route.startswith("/v1beta/"):
@@ -418,6 +470,7 @@ class ChatHandler(BaseHTTPRequestHandler):
             self.send_json({"error": {"message": f"upstream error: {exc}", "type": "upstream_error"}}, 502)
             return
 
+        text = self._render_media_urls(text)
         self._save_turn(model_name, state, messages, text, temporary)
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:20]}"
         self.send_json({
@@ -453,6 +506,7 @@ class ChatHandler(BaseHTTPRequestHandler):
             self.send_google_error(f"upstream error: {exc}", 502)
             return
 
+        text = self._render_media_urls(text)
         self._save_turn(model_name, state, messages, text, temporary)
         usage = _usage(usage_prompt, text)
         self.send_json({
@@ -517,6 +571,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                 for delta in self._heartbeat_iter(deltas):
                     if not delta:
                         continue
+                    delta = self._render_media_urls(delta)
                     emitted = True
                     text += delta
                     self._sse_data(chunk({"content": delta}))
@@ -530,6 +585,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                 )
                 for delta in self._heartbeat_iter(stateful_stream):
                     if delta:
+                        delta = self._render_media_urls(delta)
                         text += delta
                         self._sse_data(chunk({"content": delta}))
 
@@ -590,6 +646,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                 for delta in self._heartbeat_iter(deltas):
                     if not delta:
                         continue
+                    delta = self._render_media_urls(delta)
                     emitted = True
                     text += delta
                     self._sse_data({"candidates": [{
@@ -606,6 +663,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                 )
                 for delta in self._heartbeat_iter(stateful_stream):
                     if delta:
+                        delta = self._render_media_urls(delta)
                         text += delta
                         self._sse_data({"candidates": [{
                             "index": 0,

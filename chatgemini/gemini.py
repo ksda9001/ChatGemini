@@ -17,7 +17,7 @@ except ImportError:
 
 from .config import CONFIG
 from .cookies import cookie_header, load_cookie_pairs
-from .media import image_markdown
+from .media import cache_image_bytes, image_markdown
 
 _ssl_ctx = None
 _cookie_cache = {"str": "", "sapisid": None, "mtime": 0, "expires_at": None}
@@ -316,6 +316,20 @@ def _extract_images_from_line(line: str) -> list:
     return images
 
 
+def _cache_direct_image(url: str) -> str:
+    """Fetch an upstream image with the mounted browser Cookie."""
+    if not HAS_HTTPX:
+        return ""
+    try:
+        response = _get_httpx_client().get(url, headers=_build_headers())
+        if response.status_code != 200:
+            return ""
+        return cache_image_bytes(response.content, response.headers.get("content-type", "image/png"))
+    except Exception as exc:
+        log(f"Generated image cache failed: {exc}")
+        return ""
+
+
 def _merge_text_segments(texts: list) -> str:
     """Merge Gemini text segments that may be cumulative or independent chunks."""
     merged = ""
@@ -346,7 +360,7 @@ def extract_response_text(raw: str) -> str:
         for url, alt, title in _extract_images_from_line(line):
             if url in seen_images:
                 continue
-            markdown = image_markdown(url, alt, title)
+            markdown = image_markdown(_cache_direct_image(url) or url, alt, title)
             if markdown:
                 seen_images.add(url)
                 images.append(markdown)
@@ -635,7 +649,7 @@ class DirectStream:
                             for url, alt, title in _extract_images_from_line(line):
                                 if url in emitted_images:
                                     continue
-                                markdown = image_markdown(url, alt, title)
+                                markdown = image_markdown(_cache_direct_image(url) or url, alt, title)
                                 if markdown:
                                     emitted_images.add(url)
                                     emitted_any = True

@@ -38,7 +38,7 @@ The project removes coding-agent protocols, tool-call prompts, function-call par
 - Plain-chat conversation reuse backed by one small SQLite table
 - OpenWebUI title, tag, and follow-up requests sent as temporary chats
 - Optional image input through OpenAI multimodal message content
-- Generated and web images returned as Markdown image content
+- Generated and web images cached locally and returned as Markdown image content
 - Docker, Podman, and native Python deployment
 
 ## Intentionally not supported
@@ -287,6 +287,9 @@ Start with [`config.example.json`](config.example.json).
 | `cookie_file` | Browser session file | `null` uses anonymous mode |
 | `proxy` | HTTP proxy for Google | `null` uses direct/system networking |
 | `conversation_store_path` | Plain-chat SQLite file | `/app/data/conversations.db` in Docker |
+| `media_store_path` | Cached Gemini output images | `/app/data/media` in Docker |
+| `media_store_ttl_sec` | Output image retention | `86400` seconds |
+| `public_base_url` | Public origin used in image URLs | Inferred from proxy headers when empty |
 | `reuse_upstream_sessions` | Reuse Gemini Web metadata | Disabled until explicitly enabled |
 | `upstream_session_backend` | Preferred upstream session backend | `gemini_webapi`; direct transport is the fallback |
 | `max_history_messages` | Maximum recent chat messages | `60` |
@@ -325,7 +328,7 @@ Enable `reuse_upstream_sessions`, persist `/app/data`, and make sure the cookie 
 - Real Pro access depends on account eligibility, not merely having a cookie.
 - Rate limits and risk controls still apply.
 - Image upload depends on the authenticated Gemini Web upload path and may be less reliable than text.
-- Returned images use Gemini's Google-hosted URLs; availability remains controlled by Google.
+- Returned images are downloaded with the authenticated session and served from `/media/*`; persist `/app/data` and set `public_base_url` when proxy headers do not expose the public HTTPS origin.
 - ChatGemini is not a substitute for an official Google API when contractual stability is required.
 
 ## Development

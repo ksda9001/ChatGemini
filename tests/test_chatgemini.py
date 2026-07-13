@@ -1,3 +1,4 @@
+import asyncio
 import json
 import sqlite3
 import tempfile
@@ -72,6 +73,7 @@ class HttpHarness:
             "host": "127.0.0.1",
             "api_keys": [],
             "conversation_store_path": str(Path(tmpdir) / "conversations.db"),
+            "media_store_path": str(Path(tmpdir) / "media"),
             "reuse_upstream_sessions": reuse,
             "max_history_messages": 20,
             "max_history_chars": 10000,
@@ -251,7 +253,7 @@ class DirectStreamTests(unittest.TestCase):
 
         with patch("chatgemini.gemini.HAS_HTTPX", True), patch(
             "chatgemini.gemini._get_httpx_client", return_value=Client()
-        ):
+        ), patch("chatgemini.gemini._cache_direct_image", return_value=""):
             stream = DirectStream("draw", 1, 4)
             result = "".join(stream)
         self.assertIn("![a red circle](https://images.example/red.png)", result)
@@ -263,6 +265,9 @@ class MediaTests(unittest.TestCase):
         self.assertEqual(image_markdown("javascript:alert(1)"), "")
 
     def test_webapi_output_forwards_each_image_once(self):
+        async def no_cache(_image):
+            return ""
+
         image = SimpleNamespace(
             url="https://images.example/generated.png",
             alt="generated result",
@@ -270,11 +275,12 @@ class MediaTests(unittest.TestCase):
         )
         output = SimpleNamespace(text_delta="done", images=[image])
         seen = set()
-        self.assertEqual(output_deltas(output, seen), [
-            "done",
-            "\n\n![generated result](https://images.example/generated.png)",
-        ])
-        self.assertEqual(output_deltas(output, seen), ["done"])
+        with patch("chatgemini.media.cache_image_object", side_effect=no_cache):
+            self.assertEqual(asyncio.run(output_deltas(output, seen)), [
+                "done",
+                "\n\n![generated result](https://images.example/generated.png)",
+            ])
+            self.assertEqual(asyncio.run(output_deltas(output, seen)), ["done"])
 
 
 class StoreTests(unittest.TestCase):
@@ -305,6 +311,21 @@ class StoreTests(unittest.TestCase):
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_cached_media_route_serves_an_opaque_image(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            harness = HttpHarness(tmpdir, [])
+            try:
+                filename = "a" * 32 + ".png"
+                media_dir = Path(CONFIG["media_store_path"])
+                media_dir.mkdir(parents=True)
+                (media_dir / filename).write_bytes(b"png-data")
+                status, headers, body = harness.request(f"/media/{filename}")
+                self.assertEqual(status, 200)
+                self.assertEqual(headers.get("Content-Type"), "image/png")
+                self.assertEqual(body, "png-data")
+            finally:
+                harness.close()
+
     def test_health_and_models(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             harness = HttpHarness(tmpdir, [])

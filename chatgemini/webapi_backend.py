@@ -285,7 +285,7 @@ class GeminiWebAPIBackend:
         text = ""
         seen_images = set()
         async for output in chat.send_message_stream(prompt, temporary=temporary):
-            for delta in output_deltas(output, seen_images):
+            for delta in await output_deltas(output, seen_images):
                 text += delta
         return text, metadata_to_state(chat.metadata)
 
@@ -302,7 +302,7 @@ class GeminiWebAPIBackend:
             chat = _start_isolated_chat(client, self._model(client, model_name), state)
             seen_images = set()
             async for output in chat.send_message_stream(prompt, temporary=temporary):
-                for delta in output_deltas(output, seen_images):
+                for delta in await output_deltas(output, seen_images):
                     result._queue.put(("delta", delta))
             result.state = metadata_to_state(chat.metadata)
             result._queue.put(("done", None))
