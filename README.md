@@ -23,7 +23,7 @@
 
 ## Why ChatGemini?
 
-ChatGemini deliberately does one job: **reliable chatbot responses**. Its primary interface is OpenAI Chat Completions, with a small Gemini-native text adapter for existing NewAPI Gemini channels.
+ChatGemini deliberately does one job: **reliable chatbot responses**. Its primary interface is OpenAI Chat Completions, with a small Gemini-native text adapter for Gemini channels.
 
 The project removes coding-agent protocols, tool-call prompts, function-call parsing, Anthropic Messages, OpenAI Responses, and Google-native function calling. A smaller protocol surface means fewer prompt collisions, shorter requests, and fewer ways for NewAPI or OpenWebUI traffic to be misclassified.
 
