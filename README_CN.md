@@ -23,7 +23,7 @@
 
 ## 为什么做 ChatGemini
 
-ChatGemini 只做一件事：提供尽可能稳定的 Gemini 网页聊天。主接口是 OpenAI Chat Completions，同时为已有的 NewAPI Gemini 渠道提供一个精简的 Gemini 原生文本适配层。
+ChatGemini 只做一件事：提供尽可能稳定的 Gemini 网页聊天。主接口是 OpenAI Chat Completions，同时为 Gemini 渠道提供一个精简的 Gemini 原生文本适配层。
 
 项目彻底移除了编程 Agent 协议、工具提示、函数调用解析、Anthropic Messages、OpenAI Responses 和 Google 原生 Function Calling。协议面更小，意味着 prompt 冲突更少、请求更短，也更不容易把 NewAPI 或 OpenWebUI 的普通聊天误判成工具任务。
 
