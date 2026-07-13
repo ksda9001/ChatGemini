@@ -6,7 +6,11 @@ __pycache__/
 .venv/
 .env
 config.json
+config.runtime.json
+config.runtime.json.*
 cookie.txt
 cookie.json
+cookie.runtime.txt
+cookie.runtime.txt.*
 .idea/
 .DS_Store

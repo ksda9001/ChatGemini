@@ -6,7 +6,11 @@ __pycache__
 *.db-shm
 *.db-wal
 config.json
+config.runtime.json
+config.runtime.json.*
 cookie.txt
 cookie.json
+cookie.runtime.txt
+cookie.runtime.txt.*
 .env
 tests
