@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <strong>A stable, chat-only OpenAI-compatible gateway for Gemini Web.</strong><br>
+  <strong>A stable, chat-only Gemini Web gateway for OpenAI and NewAPI.</strong><br>
   Built for NewAPI, OpenWebUI, and ordinary chatbot clients.
 </p>
 
@@ -23,11 +23,12 @@
 
 ## Why ChatGemini?
 
-ChatGemini deliberately does one job: **reliable chatbot responses through the OpenAI Chat Completions API**.
+ChatGemini deliberately does one job: **reliable chatbot responses**. Its primary interface is OpenAI Chat Completions, with a small Gemini-native text adapter for existing NewAPI Gemini channels.
 
 The project removes coding-agent protocols, tool-call prompts, function-call parsing, Anthropic Messages, OpenAI Responses, and Google-native function calling. A smaller protocol surface means fewer prompt collisions, shorter requests, and fewer ways for NewAPI or OpenWebUI traffic to be misclassified.
 
 - OpenAI-compatible `/v1/chat/completions`
+- Gemini-native text compatibility for NewAPI `/v1beta` channels
 - Standard and streaming responses
 - NewAPI and OpenWebUI friendly SSE behavior
 - Heartbeats while Gemini is still thinking
@@ -47,9 +48,9 @@ ChatGemini does **not** provide:
 - Codex Responses API
 - Claude/Anthropic Messages API
 - coding-agent execution loops
-- Google-native `/v1beta` endpoints
+- Google-native tool or function calling
 
-If a client sends `tools`, `functions`, or `tool_choice` with an ordinary chat request, ChatGemini ignores those fields and returns plain assistant text. Tool schemas are never injected into the Gemini prompt.
+If a client sends OpenAI `tools`, `functions`, or `tool_choice`, or Gemini-native `tools`, `toolConfig`, `functionCall`, or `functionResponse`, ChatGemini ignores them and returns plain assistant text. Tool schemas and results are never injected into the Gemini prompt.
 
 ## API surface
 
@@ -59,8 +60,11 @@ If a client sends `tools`, `functions`, or `tool_choice` with an ordinary chat r
 | `GET` | `/healthz` | Health check |
 | `GET` | `/v1/models` | OpenAI-compatible model list |
 | `POST` | `/v1/chat/completions` | Chat, including SSE streaming |
+| `GET` | `/v1beta/models` | Gemini-compatible model list for NewAPI |
+| `POST` | `/v1beta/models/{model}:generateContent` | Gemini-compatible text chat |
+| `POST` | `/v1beta/models/{model}:streamGenerateContent` | Gemini-compatible text SSE |
 
-That is the entire public protocol surface.
+The `/v1beta` adapter is deliberately text-only. It exists to keep Gemini-format NewAPI channels working, not to restore Google function calling or agent behavior.
 
 ## Quick start
 
@@ -132,7 +136,7 @@ curl -N http://127.0.0.1:8081/v1/chat/completions \
 
 ## Connect NewAPI
 
-Create an OpenAI-compatible channel in NewAPI:
+The preferred NewAPI configuration is an OpenAI-compatible channel:
 
 | Field | Value |
 | --- | --- |
@@ -141,7 +145,9 @@ Create an OpenAI-compatible channel in NewAPI:
 | API key | Any placeholder when `api_keys` is empty; otherwise a configured key |
 | Model | `gemini-3.5-flash` |
 
-If your NewAPI version expects the versioned base URL, use `http://YOUR_SERVER:8081/v1`. Do not select an Anthropic or Google channel: ChatGemini intentionally exposes only the OpenAI chat protocol.
+If your NewAPI version expects the versioned base URL, use `http://YOUR_SERVER:8081/v1`.
+
+Existing Gemini-format NewAPI channels can stay in place. Point their Base URL at `http://YOUR_SERVER:8081`; ChatGemini supports the native `generateContent` and `streamGenerateContent` routes for text chat. This compatibility mode ignores Gemini tool/function settings. Anthropic channels remain unsupported.
 
 Recommended NewAPI settings:
 
@@ -326,7 +332,7 @@ python -m py_compile chatgemini/*.py tests/test_chatgemini.py
 git diff --check
 ```
 
-The test suite covers OpenAI response shapes, streaming, usage frames, heartbeats, route removal, ignored tool schemas, SQLite continuity, Cookie expiry, and output continuation.
+The test suite covers OpenAI and Gemini-compatible text response shapes, streaming, usage frames, heartbeats, route removal, ignored tool schemas, SQLite continuity, Cookie expiry, and output continuation.
 
 ## Acknowledgments
 

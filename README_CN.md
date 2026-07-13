@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <strong>稳定、纯聊天的 Gemini Web OpenAI 兼容网关。</strong><br>
+  <strong>稳定、纯聊天的 Gemini Web 网关，兼容 OpenAI 和 NewAPI。</strong><br>
   专门服务 NewAPI、OpenWebUI 和普通聊天机器人客户端。
 </p>
 
@@ -23,11 +23,12 @@
 
 ## 为什么做 ChatGemini
 
-ChatGemini 只做一件事：通过 OpenAI Chat Completions API 提供尽可能稳定的 Gemini 网页聊天。
+ChatGemini 只做一件事：提供尽可能稳定的 Gemini 网页聊天。主接口是 OpenAI Chat Completions，同时为已有的 NewAPI Gemini 渠道提供一个精简的 Gemini 原生文本适配层。
 
 项目彻底移除了编程 Agent 协议、工具提示、函数调用解析、Anthropic Messages、OpenAI Responses 和 Google 原生 Function Calling。协议面更小，意味着 prompt 冲突更少、请求更短，也更不容易把 NewAPI 或 OpenWebUI 的普通聊天误判成工具任务。
 
 - OpenAI 兼容 `/v1/chat/completions`
+- 为 NewAPI `/v1beta` 渠道提供 Gemini 原生纯文本兼容
 - 普通与 SSE 流式聊天
 - NewAPI、OpenWebUI 友好的流式响应
 - Gemini 思考期间持续发送心跳
@@ -47,9 +48,9 @@ ChatGemini 不提供：
 - Codex Responses API
 - Claude/Anthropic Messages API
 - 编程 Agent 执行循环
-- Google 原生 `/v1beta` 接口
+- Google 原生工具或函数调用
 
-如果客户端在普通聊天请求中附带 `tools`、`functions` 或 `tool_choice`，ChatGemini 会忽略它们并返回纯文本。工具 schema 永远不会注入 Gemini prompt。
+如果客户端附带 OpenAI 的 `tools`、`functions`、`tool_choice`，或 Gemini 原生的 `tools`、`toolConfig`、`functionCall`、`functionResponse`，ChatGemini 都会忽略它们，只返回纯文本。工具 schema 和结果永远不会注入 Gemini prompt。
 
 ## API 接口
 
@@ -59,8 +60,11 @@ ChatGemini 不提供：
 | `GET` | `/healthz` | 健康检查 |
 | `GET` | `/v1/models` | OpenAI 兼容模型列表 |
 | `POST` | `/v1/chat/completions` | 普通和 SSE 流式聊天 |
+| `GET` | `/v1beta/models` | 供 NewAPI 使用的 Gemini 兼容模型列表 |
+| `POST` | `/v1beta/models/{model}:generateContent` | Gemini 兼容纯文本聊天 |
+| `POST` | `/v1beta/models/{model}:streamGenerateContent` | Gemini 兼容纯文本 SSE |
 
-这就是完整的公开协议面。
+`/v1beta` 适配层刻意只支持文本。它用于让 Gemini 格式的 NewAPI 渠道继续工作，不会恢复 Google Function Calling 或 Agent 行为。
 
 ## 快速开始
 
@@ -132,7 +136,7 @@ curl -N http://127.0.0.1:8081/v1/chat/completions \
 
 ## 接入 NewAPI
 
-在 NewAPI 中创建 OpenAI 兼容渠道：
+推荐在 NewAPI 中创建 OpenAI 兼容渠道：
 
 | 字段 | 值 |
 | --- | --- |
@@ -141,7 +145,9 @@ curl -N http://127.0.0.1:8081/v1/chat/completions \
 | API Key | `api_keys` 为空时填任意占位值；否则填写配置中的密钥 |
 | 模型 | `gemini-3.5-flash` |
 
-如果你的 NewAPI 版本要求带版本路径，使用 `http://你的服务器:8081/v1`。不要选择 Anthropic 或 Google 渠道，ChatGemini 只提供 OpenAI 聊天协议。
+如果你的 NewAPI 版本要求带版本路径，使用 `http://你的服务器:8081/v1`。
+
+已有的 Gemini 格式 NewAPI 渠道也无需重建。将 Base URL 指向 `http://你的服务器:8081` 即可；ChatGemini 支持原生 `generateContent` 和 `streamGenerateContent` 纯文本路由。这个兼容模式会忽略 Gemini 工具/函数配置。Anthropic 渠道仍然不支持。
 
 建议：
 
@@ -326,7 +332,7 @@ python -m py_compile chatgemini/*.py tests/test_chatgemini.py
 git diff --check
 ```
 
-测试覆盖 OpenAI 响应格式、流式输出、usage 帧、心跳、Agent 路由移除、工具 schema 忽略、SQLite 续接、Cookie 过期和自动续写。
+测试覆盖 OpenAI 和 Gemini 兼容文本响应格式、流式输出、usage 帧、心跳、路由移除、工具 schema 忽略、SQLite 续接、Cookie 过期和自动续写。
 
 ## 致谢
 

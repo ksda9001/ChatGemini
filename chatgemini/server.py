@@ -11,7 +11,12 @@ from urllib.parse import urlsplit
 from . import __version__
 from .config import CONFIG
 from .gemini import generate_stream, generate_with_state, log
-from .messages import compact_messages, messages_to_prompt, serializable_messages
+from .messages import (
+    compact_messages,
+    google_request_to_messages,
+    messages_to_prompt,
+    serializable_messages,
+)
 from .models import MODELS, resolve_model
 from .multimodal import fetch_image_bytes, upload_image
 from .sessions import ConversationStore
@@ -84,7 +89,8 @@ class ChatHandler(BaseHTTPRequestHandler):
             return True
         authorization = self.headers.get("Authorization", "")
         bearer = authorization[7:] if authorization.startswith("Bearer ") else ""
-        return (bearer or self.headers.get("x-api-key", "")) in keys
+        supplied_key = bearer or self.headers.get("x-api-key", "") or self.headers.get("x-goog-api-key", "")
+        return supplied_key in keys
 
     def send_json(self, data, status=200):
         body = json.dumps(data, ensure_ascii=False).encode()
@@ -94,6 +100,21 @@ class ChatHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def send_google_error(self, message, status=400):
+        google_status = {
+            400: "INVALID_ARGUMENT",
+            401: "UNAUTHENTICATED",
+            404: "NOT_FOUND",
+            413: "RESOURCE_EXHAUSTED",
+            502: "UNAVAILABLE",
+            500: "INTERNAL",
+        }.get(status, "UNKNOWN")
+        self.send_json({"error": {
+            "code": status,
+            "message": message,
+            "status": google_status,
+        }}, status)
 
     def _start_sse(self):
         self.send_response(200)
@@ -136,9 +157,9 @@ class ChatHandler(BaseHTTPRequestHandler):
             else:
                 return
 
-    def _prepare_chat(self, request: dict, model_name: str):
+    def _prepare_messages(self, raw_messages: list, model_name: str):
         messages = compact_messages(
-            request.get("messages") or [],
+            raw_messages or [],
             int(CONFIG.get("max_history_messages", 60) or 60),
             int(CONFIG.get("max_history_chars", 80000) or 80000),
         )
@@ -162,6 +183,9 @@ class ChatHandler(BaseHTTPRequestHandler):
                 log(f"Conversation cache lookup failed; using full history: {exc}")
         return messages, stored_messages, prompt, full_prompt, images, upstream_state, temporary, resumed
 
+    def _prepare_chat(self, request: dict, model_name: str):
+        return self._prepare_messages(request.get("messages") or [], model_name)
+
     def _save_turn(self, model_name, upstream_state, messages, text, temporary):
         if not CONFIG.get("reuse_upstream_sessions", False) or not upstream_state or temporary:
             return
@@ -180,9 +204,12 @@ class ChatHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
-        if self.route.startswith("/v1/") and not self._authorized():
+        if self.route.startswith(("/v1/", "/v1beta/")) and not self._authorized():
             self.close_connection = True
-            self.send_json({"error": {"message": "invalid api key", "type": "authentication_error"}}, 401)
+            if self.route.startswith("/v1beta/"):
+                self.send_google_error("invalid api key", 401)
+            else:
+                self.send_json({"error": {"message": "invalid api key", "type": "authentication_error"}}, 401)
             return
         if self.route == "/v1/models":
             self.send_json({
@@ -194,6 +221,21 @@ class ChatHandler(BaseHTTPRequestHandler):
                         "created": 1700000000,
                         "owned_by": "google-web",
                         "description": config["desc"],
+                    }
+                    for name, config in MODELS.items()
+                ],
+            })
+        elif self.route == "/v1beta/models":
+            self.send_json({
+                "models": [
+                    {
+                        "name": f"models/{name}",
+                        "version": "chatgemini-1",
+                        "displayName": name,
+                        "description": config["desc"],
+                        "inputTokenLimit": int(CONFIG.get("max_history_chars", 80000) or 80000) // 4,
+                        "outputTokenLimit": 20000,
+                        "supportedGenerationMethods": ["generateContent", "streamGenerateContent"],
                     }
                     for name, config in MODELS.items()
                 ],
@@ -210,44 +252,73 @@ class ChatHandler(BaseHTTPRequestHandler):
             self.send_json({"error": {"message": "not found", "type": "not_found_error"}}, 404)
 
     def do_POST(self):
-        if self.route.startswith("/v1/") and not self._authorized():
+        is_google_route = self.route.startswith("/v1beta/")
+        if self.route.startswith(("/v1/", "/v1beta/")) and not self._authorized():
             self.close_connection = True
-            self.send_json({"error": {"message": "invalid api key", "type": "authentication_error"}}, 401)
+            if is_google_route:
+                self.send_google_error("invalid api key", 401)
+            else:
+                self.send_json({"error": {"message": "invalid api key", "type": "authentication_error"}}, 401)
             return
-        if self.route != "/v1/chat/completions":
+        google_operation = None
+        google_model = None
+        if is_google_route and self.route.startswith("/v1beta/models/"):
+            model_and_operation = self.route[len("/v1beta/models/"):]
+            google_model, separator, google_operation = model_and_operation.partition(":")
+            if not separator or google_operation not in ("generateContent", "streamGenerateContent"):
+                google_operation = None
+        if self.route != "/v1/chat/completions" and not google_operation:
             # The body belongs to an unsupported endpoint. Closing prevents an
             # HTTP/1.1 keep-alive parser from treating it as a second request.
             self.close_connection = True
-            self.send_json({"error": {"message": "not found", "type": "not_found_error"}}, 404)
+            if is_google_route:
+                self.send_google_error("not found", 404)
+            else:
+                self.send_json({"error": {"message": "not found", "type": "not_found_error"}}, 404)
             return
 
         try:
             length = int(self.headers.get("Content-Length", "0") or 0)
         except ValueError:
-            self.send_json({"error": {"message": "invalid Content-Length", "type": "invalid_request_error"}}, 400)
+            if is_google_route:
+                self.send_google_error("invalid Content-Length")
+            else:
+                self.send_json({"error": {"message": "invalid Content-Length", "type": "invalid_request_error"}}, 400)
             return
         limit = int(CONFIG.get("max_request_body_bytes", 20 * 1024 * 1024) or 0)
         if limit > 0 and length > limit:
-            self.send_json({"error": {"message": "request body too large", "type": "invalid_request_error"}}, 413)
+            if is_google_route:
+                self.send_google_error("request body too large", 413)
+            else:
+                self.send_json({"error": {"message": "request body too large", "type": "invalid_request_error"}}, 413)
             return
         body = self.rfile.read(length) if length else b""
         try:
             request = json.loads(body)
         except (TypeError, ValueError):
-            self.send_json({"error": {"message": "invalid JSON", "type": "invalid_request_error"}}, 400)
+            if is_google_route:
+                self.send_google_error("invalid JSON")
+            else:
+                self.send_json({"error": {"message": "invalid JSON", "type": "invalid_request_error"}}, 400)
             return
         try:
-            self._handle_chat(request)
+            if google_operation:
+                self._handle_google_chat(request, google_model, google_operation == "streamGenerateContent")
+            else:
+                self._handle_chat(request)
         except (BrokenPipeError, ConnectionResetError):
             return
         except Exception as exc:
-            log(f"Unexpected chat request error: {exc}")
-            self.send_json({
-                "error": {
-                    "message": "internal server error",
-                    "type": "server_error",
-                }
-            }, 500)
+            log(f"Unexpected {'Google' if is_google_route else 'OpenAI'} chat request error: {exc}")
+            if is_google_route:
+                self.send_google_error("internal server error", 500)
+            else:
+                self.send_json({
+                    "error": {
+                        "message": "internal server error",
+                        "type": "server_error",
+                    }
+                }, 500)
 
     def _handle_chat(self, request: dict):
         if not isinstance(request, dict) or not isinstance(request.get("messages"), list):
@@ -285,6 +356,39 @@ class ChatHandler(BaseHTTPRequestHandler):
                 prompt, full_prompt, images, state, temporary,
             )
 
+    def _handle_google_chat(self, request: dict, requested_model: str, stream: bool):
+        if not isinstance(request, dict):
+            self.send_google_error("request body must be an object")
+            return
+        model_name, model_id, think_mode, error, extra_fields = resolve_model(
+            requested_model or CONFIG["default_model"]
+        )
+        if error:
+            self.send_google_error(error)
+            return
+
+        prepared = self._prepare_messages(google_request_to_messages(request), model_name)
+        messages, stored_messages, prompt, full_prompt, images, state, temporary, resumed = prepared
+        if not prompt.strip() and not images:
+            self.send_google_error("contents must include text or image data")
+            return
+        ignored_tools = bool(request.get("tools") or request.get("toolConfig"))
+        log(
+            f"Google text request: model={model_name} stream={stream} "
+            f"temporary={temporary} resumed={resumed} ignored_tools={ignored_tools} "
+            f"prompt_len={len(prompt)} fallback_len={len(full_prompt)}"
+        )
+        if stream:
+            self._stream_google_chat(
+                model_name, model_id, think_mode, extra_fields, stored_messages,
+                prompt, full_prompt, images, state, temporary,
+            )
+        else:
+            self._complete_google_chat(
+                model_name, model_id, think_mode, extra_fields, stored_messages,
+                prompt, full_prompt, images, state, temporary,
+            )
+
     def _complete_chat(
         self, model_name, model_id, think_mode, extra_fields, messages,
         prompt, full_prompt, images, state, temporary,
@@ -318,6 +422,42 @@ class ChatHandler(BaseHTTPRequestHandler):
                 "finish_reason": "stop",
             }],
             "usage": _usage(usage_prompt, text),
+        })
+
+    def _complete_google_chat(
+        self, model_name, model_id, think_mode, extra_fields, messages,
+        prompt, full_prompt, images, state, temporary,
+    ):
+        try:
+            text, state, usage_prompt = generate_with_state(
+                prompt,
+                model_id,
+                think_mode,
+                _upload_images(images),
+                extra_fields,
+                state,
+                full_prompt,
+                model_name=model_name,
+                temporary=temporary,
+            )
+        except Exception as exc:
+            self.send_google_error(f"upstream error: {exc}", 502)
+            return
+
+        self._save_turn(model_name, state, messages, text, temporary)
+        usage = _usage(usage_prompt, text)
+        self.send_json({
+            "candidates": [{
+                "index": 0,
+                "content": {"role": "model", "parts": [{"text": text}]},
+                "finishReason": "STOP",
+            }],
+            "usageMetadata": {
+                "promptTokenCount": usage["prompt_tokens"],
+                "candidatesTokenCount": usage["completion_tokens"],
+                "totalTokenCount": usage["total_tokens"],
+            },
+            "modelVersion": model_name,
         })
 
     def _stream_chat(
@@ -399,6 +539,87 @@ class ChatHandler(BaseHTTPRequestHandler):
             try:
                 self._sse_data({"error": {"message": f"upstream error: {exc}", "type": "upstream_error"}})
                 self._sse_data("[DONE]")
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+    def _stream_google_chat(
+        self, model_name, model_id, think_mode, extra_fields, messages,
+        prompt, full_prompt, images, state, temporary,
+    ):
+        self._start_sse()
+        self.close_connection = True
+        file_refs = _upload_images(images)
+        web_stream = None
+        try:
+            use_webapi = (
+                CONFIG.get("reuse_upstream_sessions", False)
+                and CONFIG.get("upstream_session_backend") == "gemini_webapi"
+                and not file_refs
+            )
+            if use_webapi:
+                from .webapi_backend import generate_stream_with_state
+
+                web_stream = generate_stream_with_state(
+                    prompt, model_name, state, temporary=temporary
+                )
+                deltas = web_stream
+            else:
+                deltas = generate_stream(
+                    full_prompt, model_id, think_mode, file_refs, extra_fields, temporary
+                )
+
+            text = ""
+            emitted = False
+            try:
+                for delta in self._heartbeat_iter(deltas):
+                    if not delta:
+                        continue
+                    emitted = True
+                    text += delta
+                    self._sse_data({"candidates": [{
+                        "index": 0,
+                        "content": {"role": "model", "parts": [{"text": delta}]},
+                    }], "modelVersion": model_name})
+            except Exception:
+                if emitted or web_stream is None or not CONFIG.get("upstream_session_fallback_direct", True):
+                    raise
+                log("Gemini Web stream failed before output; retrying with the direct transport")
+                for delta in self._heartbeat_iter(
+                    generate_stream(full_prompt, model_id, think_mode, file_refs, extra_fields, temporary)
+                ):
+                    if delta:
+                        text += delta
+                        self._sse_data({"candidates": [{
+                            "index": 0,
+                            "content": {"role": "model", "parts": [{"text": delta}]},
+                        }], "modelVersion": model_name})
+                web_stream = None
+
+            if web_stream is not None and web_stream.state:
+                self._save_turn(model_name, web_stream.state, messages, text, temporary)
+            usage = _usage(prompt, text)
+            self._sse_data({
+                "candidates": [{
+                    "index": 0,
+                    "content": {"role": "model", "parts": []},
+                    "finishReason": "STOP",
+                }],
+                "usageMetadata": {
+                    "promptTokenCount": usage["prompt_tokens"],
+                    "candidatesTokenCount": usage["completion_tokens"],
+                    "totalTokenCount": usage["total_tokens"],
+                },
+                "modelVersion": model_name,
+            })
+        except (BrokenPipeError, ConnectionResetError):
+            return
+        except Exception as exc:
+            try:
+                self._sse_data({"error": {
+                    "code": 502,
+                    "message": f"upstream error: {exc}",
+                    "status": "UNAVAILABLE",
+                }})
             except (BrokenPipeError, ConnectionResetError):
                 pass
 

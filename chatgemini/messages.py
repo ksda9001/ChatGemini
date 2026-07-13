@@ -168,3 +168,59 @@ def serializable_messages(messages: list) -> list:
             item["has_images"] = True
         result.append(item)
     return result
+
+
+def _google_content_parts(parts: list) -> tuple:
+    """Extract text and inline images from Gemini-native content parts."""
+    texts = []
+    images = []
+    for part in parts or []:
+        if not isinstance(part, dict):
+            continue
+        if isinstance(part.get("text"), str):
+            texts.append(part["text"])
+            continue
+        if not isinstance(part.get("inlineData"), dict):
+            continue
+        inline = part["inlineData"]
+        data = inline.get("data")
+        if not isinstance(data, str):
+            continue
+        try:
+            images.append((
+                base64.b64decode(data, validate=True),
+                inline.get("mimeType") or "application/octet-stream",
+            ))
+        except (ValueError, TypeError):
+            continue
+    return texts, images
+
+
+def google_request_to_messages(request: dict) -> list:
+    """Normalize Google-native content into the same chat-only message shape.
+
+    `functionCall` and `functionResponse` parts are intentionally ignored. This
+    adapter exists for NewAPI's Gemini-format channels, not for tool calling.
+    """
+    messages = []
+    system = request.get("systemInstruction") or {}
+    if isinstance(system, dict):
+        texts, images = _google_content_parts(system.get("parts") or [])
+        if texts or images:
+            item = {"role": "system", "content": "\n".join(texts)}
+            if images:
+                item["_images"] = images
+            messages.append(item)
+
+    for content in request.get("contents") or []:
+        if not isinstance(content, dict):
+            continue
+        role = "assistant" if content.get("role") == "model" else "user"
+        texts, images = _google_content_parts(content.get("parts") or [])
+        # Function protocol parts intentionally do not reach Gemini.
+        if texts or images:
+            item = {"role": role, "content": "\n".join(texts)}
+            if images:
+                item["_images"] = images
+            messages.append(item)
+    return messages

@@ -13,7 +13,12 @@ import chatgemini.server as server
 from chatgemini.config import CONFIG, DEFAULT_CONFIG
 from chatgemini.cookies import cookie_pairs_from_content
 from chatgemini.gemini import _append_continuation, _was_truncated
-from chatgemini.messages import compact_messages, messages_to_prompt, normalize_messages
+from chatgemini.messages import (
+    compact_messages,
+    google_request_to_messages,
+    messages_to_prompt,
+    normalize_messages,
+)
 from chatgemini.sessions import ConversationStore
 from chatgemini.webapi_backend import metadata_to_state, state_to_metadata
 
@@ -143,6 +148,27 @@ class MessageTests(unittest.TestCase):
         self.assertLess(len(compacted[0]["content"]), 180)
         self.assertIn("TAIL", compacted[0]["content"])
 
+    def test_google_message_normalization_discards_function_protocol(self):
+        messages = google_request_to_messages({
+            "systemInstruction": {"parts": [{"text": "be concise"}]},
+            "contents": [
+                {"role": "user", "parts": [{"text": "hello"}]},
+                {"role": "model", "parts": [{"text": "hi"}, {"functionCall": {
+                    "name": "shell_command", "args": {"command": "secret"},
+                }}]},
+                {"role": "user", "parts": [{"functionResponse": {
+                    "name": "shell_command", "response": {"output": "secret output"},
+                }}]},
+            ],
+        })
+        prompt, _ = messages_to_prompt(messages)
+        self.assertEqual([message["role"] for message in messages], ["system", "user", "assistant"])
+        self.assertIn("be concise", prompt)
+        self.assertIn("hello", prompt)
+        self.assertIn("hi", prompt)
+        self.assertNotIn("shell_command", prompt)
+        self.assertNotIn("secret output", prompt)
+
 
 class StoreTests(unittest.TestCase):
     def test_store_contains_only_plain_conversation_table(self):
@@ -182,6 +208,9 @@ class ProtocolTests(unittest.TestCase):
                 status, _, body = harness.request("/v1/models")
                 self.assertEqual(status, 200)
                 self.assertGreater(len(json.loads(body)["data"]), 0)
+                status, _, body = harness.request("/v1beta/models")
+                self.assertEqual(status, 200)
+                self.assertTrue(json.loads(body)["models"][0]["name"].startswith("models/"))
             finally:
                 harness.close()
 
@@ -260,11 +289,56 @@ class ProtocolTests(unittest.TestCase):
             finally:
                 harness.close()
 
+    def test_google_non_stream_is_text_only_and_ignores_tools(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            harness = HttpHarness(tmpdir, ["plain Gemini answer"])
+            try:
+                status, response = harness.post_json("/v1beta/models/gemini-3.5-flash-thinking:generateContent", {
+                    "systemInstruction": {"parts": [{"text": "answer succinctly"}]},
+                    "contents": [{"role": "user", "parts": [
+                        {"text": "explain the weather"},
+                        {"functionResponse": {"name": "shell_command", "response": {"output": "secret"}}},
+                    ]}],
+                    "tools": [{"functionDeclarations": [{
+                        "name": "shell_command",
+                        "description": "execute commands",
+                    }]}],
+                    "toolConfig": {"functionCallingConfig": {"mode": "ANY"}},
+                })
+                self.assertEqual(status, 200)
+                self.assertEqual(response["candidates"][0]["content"]["role"], "model")
+                self.assertEqual(response["candidates"][0]["content"]["parts"][0]["text"], "plain Gemini answer")
+                self.assertEqual(response["candidates"][0]["finishReason"], "STOP")
+                prompt = harness.prompts[0]
+                self.assertIn("explain the weather", prompt)
+                self.assertNotIn("shell_command", prompt)
+                self.assertNotIn("execute commands", prompt)
+                self.assertNotIn("secret", prompt)
+            finally:
+                harness.close()
+
+    def test_google_stream_uses_google_sse_without_done_frame(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            harness = HttpHarness(tmpdir, [], stream_responses=[["hello", " world"]])
+            try:
+                status, headers, body = harness.request(
+                    "/v1beta/models/gemini-3.5-flash:streamGenerateContent?alt=sse",
+                    {"contents": [{"role": "user", "parts": [{"text": "hello"}]}]},
+                )
+                self.assertEqual(status, 200)
+                self.assertIn("text/event-stream", headers.get("Content-Type"))
+                self.assertIn('"text": "hello"', body)
+                self.assertIn('"text": " world"', body)
+                self.assertIn('"finishReason": "STOP"', body)
+                self.assertNotIn("[DONE]", body)
+            finally:
+                harness.close()
+
     def test_non_chat_routes_are_not_exposed(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             harness = HttpHarness(tmpdir, [])
             try:
-                for path in ("/v1/responses", "/v1/messages", "/v1beta/models/x:generateContent"):
+                for path in ("/v1/responses", "/v1/messages", "/v1beta/models/x:countTokens"):
                     with self.assertRaises(urllib.error.HTTPError) as caught:
                         harness.request(path, {})
                     self.assertEqual(caught.exception.code, 404)
