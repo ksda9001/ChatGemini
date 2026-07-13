@@ -181,6 +181,7 @@ class ChatHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.route.startswith("/v1/") and not self._authorized():
+            self.close_connection = True
             self.send_json({"error": {"message": "invalid api key", "type": "authentication_error"}}, 401)
             return
         if self.route == "/v1/models":
@@ -210,9 +211,13 @@ class ChatHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         if self.route.startswith("/v1/") and not self._authorized():
+            self.close_connection = True
             self.send_json({"error": {"message": "invalid api key", "type": "authentication_error"}}, 401)
             return
         if self.route != "/v1/chat/completions":
+            # The body belongs to an unsupported endpoint. Closing prevents an
+            # HTTP/1.1 keep-alive parser from treating it as a second request.
+            self.close_connection = True
             self.send_json({"error": {"message": "not found", "type": "not_found_error"}}, 404)
             return
 
