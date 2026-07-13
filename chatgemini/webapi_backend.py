@@ -123,6 +123,8 @@ class GeminiWebAPIBackend:
         # together. Keep those coroutines from replacing a client while its
         # initial authentication request is still in flight.
         self._client_lock = asyncio.Lock()
+        self._background_tasks = set()
+        self._pending_chats = {}
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
         self._thread.start()
 
@@ -132,6 +134,24 @@ class GeminiWebAPIBackend:
 
     def _submit(self, coroutine) -> Future:
         return asyncio.run_coroutine_threadsafe(coroutine, self._loop)
+
+    def _spawn(self, coroutine):
+        task = self._loop.create_task(coroutine)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+        return task
+
+    async def _wait_for_pending_chat(self, state: dict = None):
+        conversation_id = (state or {}).get("conversation_id")
+        pending = self._pending_chats.get(conversation_id) if conversation_id else None
+        if pending is None or pending is asyncio.current_task():
+            return
+        try:
+            await asyncio.shield(pending)
+        except BaseException:
+            # The visible response was already complete. A tail-drain failure
+            # must not prevent the next turn from using its persisted metadata.
+            return
 
     @staticmethod
     def _credentials() -> tuple:
@@ -269,6 +289,67 @@ class GeminiWebAPIBackend:
                 return model
         return target
 
+    @staticmethod
+    def _is_visible_completion(output, deltas: list, emitted: bool) -> bool:
+        if not emitted or deltas:
+            return False
+        if getattr(output, "thoughts_delta", ""):
+            return False
+        if getattr(output, "videos", None) or getattr(output, "media", None):
+            return False
+        return bool(getattr(output, "metadata", None) and getattr(output, "rcid", None))
+
+    async def _consume(
+        self,
+        prompt: str,
+        model_name: str,
+        state: dict = None,
+        temporary: bool = False,
+        on_delta=None,
+        on_complete=None,
+        on_error=None,
+    ):
+        completed = False
+        pending_id = ""
+        try:
+            await self._wait_for_pending_chat(state)
+            client = await self._ensure_client()
+            chat = _start_isolated_chat(client, self._model(client, model_name), state)
+            seen_images = set()
+            emitted = False
+            async for output in chat.send_message_stream(prompt, temporary=temporary):
+                deltas = await output_deltas(output, seen_images)
+                for delta in deltas:
+                    emitted = True
+                    if on_delta:
+                        on_delta(delta)
+
+                if (
+                    CONFIG.get("webapi_fast_finish", True)
+                    and self._is_visible_completion(output, deltas, emitted)
+                    and not completed
+                ):
+                    current_state = metadata_to_state(chat.metadata)
+                    pending_id = current_state.get("conversation_id", "")
+                    if pending_id:
+                        self._pending_chats[pending_id] = asyncio.current_task()
+                    completed = True
+                    if on_complete:
+                        on_complete(current_state)
+
+            if not completed:
+                completed = True
+                if on_complete:
+                    on_complete(metadata_to_state(chat.metadata))
+        except BaseException as exc:
+            if not completed and on_error:
+                on_error(exc)
+            elif not completed:
+                raise
+        finally:
+            if pending_id and self._pending_chats.get(pending_id) is asyncio.current_task():
+                self._pending_chats.pop(pending_id, None)
+
     async def _generate(
         self,
         prompt: str,
@@ -276,18 +357,28 @@ class GeminiWebAPIBackend:
         state: dict = None,
         temporary: bool = False,
     ):
-        client = await self._ensure_client()
-        chat = _start_isolated_chat(client, self._model(client, model_name), state)
-        # Gemini Web's non-streaming helper can wait indefinitely after its
-        # upstream StreamGenerate request has started. The streaming variant is
-        # the same Web endpoint but completes reliably, so collect its deltas
-        # for callers that need one complete non-streaming chat response.
-        text = ""
-        seen_images = set()
-        async for output in chat.send_message_stream(prompt, temporary=temporary):
-            for delta in await output_deltas(output, seen_images):
-                text += delta
-        return text, metadata_to_state(chat.metadata)
+        loop = asyncio.get_running_loop()
+        visible = loop.create_future()
+        text = []
+
+        def complete(next_state):
+            if not visible.done():
+                visible.set_result(("".join(text), next_state))
+
+        def fail(exc):
+            if not visible.done():
+                visible.set_exception(exc)
+
+        self._spawn(self._consume(
+            prompt,
+            model_name,
+            state,
+            temporary,
+            on_delta=text.append,
+            on_complete=complete,
+            on_error=fail,
+        ))
+        return await visible
 
     async def _stream(
         self,
@@ -297,17 +388,22 @@ class GeminiWebAPIBackend:
         state: dict = None,
         temporary: bool = False,
     ):
-        try:
-            client = await self._ensure_client()
-            chat = _start_isolated_chat(client, self._model(client, model_name), state)
-            seen_images = set()
-            async for output in chat.send_message_stream(prompt, temporary=temporary):
-                for delta in await output_deltas(output, seen_images):
-                    result._queue.put(("delta", delta))
-            result.state = metadata_to_state(chat.metadata)
+        def complete(next_state):
+            result.state = next_state
             result._queue.put(("done", None))
-        except BaseException as exc:
+
+        def fail(exc):
             result._queue.put(("error", exc))
+
+        await self._consume(
+            prompt,
+            model_name,
+            state,
+            temporary,
+            on_delta=lambda delta: result._queue.put(("delta", delta)),
+            on_complete=complete,
+            on_error=fail,
+        )
 
     def generate(
         self,

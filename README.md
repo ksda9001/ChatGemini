@@ -32,6 +32,7 @@ The project removes coding-agent protocols, tool-call prompts, function-call par
 - Standard and streaming responses
 - NewAPI and OpenWebUI friendly SSE behavior
 - Heartbeats while Gemini is still thinking
+- Early completion on Gemini's final visible frame, without its idle tail delay
 - Automatic retries for empty upstream responses
 - Automatic continuation for Gemini output-limit error `1155`
 - Optional authenticated Gemini Web sessions
@@ -292,6 +293,7 @@ Start with [`config.example.json`](config.example.json).
 | `public_base_url` | Public origin used in image URLs | Inferred from proxy headers when empty |
 | `reuse_upstream_sessions` | Reuse Gemini Web metadata | Disabled until explicitly enabled |
 | `upstream_session_backend` | Preferred upstream session backend | `gemini_webapi`; direct transport is the fallback |
+| `webapi_fast_finish` | Hide Gemini Web's idle response tail | Enabled; the tail drains in the background |
 | `max_history_messages` | Maximum recent chat messages | `60` |
 | `max_history_chars` | Approximate prompt character cap | `80000` |
 | `sse_heartbeat_sec` | Keepalive interval | `10` seconds |

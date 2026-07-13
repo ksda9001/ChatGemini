@@ -38,6 +38,7 @@ DEFAULT_CONFIG = {
     "cookie_refresh_interval_sec": 600,
     "webapi_watchdog_sec": 120,
     "webapi_request_timeout_sec": 180,
+    "webapi_fast_finish": True,
     "temporary_background_tasks": True,
     "require_authenticated_webapi": True,
     "webapi_allow_unverified_account": False,

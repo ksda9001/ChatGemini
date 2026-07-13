@@ -24,7 +24,7 @@ from chatgemini.messages import (
 )
 from chatgemini.media import cache_image_object, image_markdown, output_deltas
 from chatgemini.sessions import ConversationStore
-from chatgemini.webapi_backend import metadata_to_state, state_to_metadata
+from chatgemini.webapi_backend import GeminiWebAPIBackend, metadata_to_state, state_to_metadata
 
 
 class HttpHarness:
@@ -295,6 +295,113 @@ class MediaTests(unittest.TestCase):
                 filename = placeholder.rsplit("/", 1)[-1]
                 self.assertRegex(filename, r"^[a-f0-9]{32}\.jpg$")
                 self.assertEqual((Path(tmpdir) / "media" / filename).read_bytes(), b"jpeg-data")
+
+
+class WebAPIBackendTests(unittest.TestCase):
+    def test_visible_completion_returns_before_tail_drain(self):
+        async def scenario():
+            instance = object.__new__(GeminiWebAPIBackend)
+            instance._loop = asyncio.get_running_loop()
+            instance._background_tasks = set()
+            instance._pending_chats = {}
+
+            async def ensure_client():
+                return object()
+
+            instance._ensure_client = ensure_client
+            instance._model = lambda _client, model: model
+            tail_finished = asyncio.Event()
+
+            def output(text_delta):
+                return SimpleNamespace(
+                    text_delta=text_delta,
+                    images=[],
+                    thoughts_delta="",
+                    videos=[],
+                    media=[],
+                    metadata=["cid", "rid"],
+                    rcid="choice",
+                )
+
+            class Chat:
+                metadata = ["cid", "rid", "choice", None, None, None, None, None, None, ""]
+
+                async def send_message_stream(self, _prompt, temporary=False):
+                    yield output("pong")
+                    yield output("")
+                    await asyncio.sleep(0.05)
+                    tail_finished.set()
+
+            with patch("chatgemini.webapi_backend._start_isolated_chat", return_value=Chat()):
+                text, state = await instance._generate("ping", "gemini-3.5-flash")
+                self.assertEqual(text, "pong")
+                self.assertEqual(state["conversation_id"], "cid")
+                self.assertFalse(tail_finished.is_set())
+                await asyncio.gather(*list(instance._background_tasks))
+                self.assertTrue(tail_finished.is_set())
+
+        asyncio.run(scenario())
+
+    def test_next_turn_waits_for_previous_tail_drain(self):
+        async def scenario():
+            instance = object.__new__(GeminiWebAPIBackend)
+            instance._loop = asyncio.get_running_loop()
+            instance._background_tasks = set()
+            instance._pending_chats = {}
+
+            async def ensure_client():
+                return object()
+
+            instance._ensure_client = ensure_client
+            instance._model = lambda _client, model: model
+            release_tail = asyncio.Event()
+            second_started = asyncio.Event()
+            chats_created = 0
+
+            def output(text_delta, cid):
+                return SimpleNamespace(
+                    text_delta=text_delta,
+                    images=[],
+                    thoughts_delta="",
+                    videos=[],
+                    media=[],
+                    metadata=[cid, "rid"],
+                    rcid="choice",
+                )
+
+            class Chat:
+                def __init__(self, index):
+                    self.index = index
+                    self.metadata = ["cid", f"rid-{index}", "choice", None, None, None, None, None, None, ""]
+
+                async def send_message_stream(self, _prompt, temporary=False):
+                    if self.index == 2:
+                        second_started.set()
+                    yield output(f"answer-{self.index}", "cid")
+                    yield output("", "cid")
+                    if self.index == 1:
+                        await release_tail.wait()
+
+            def start_chat(*_args, **_kwargs):
+                nonlocal chats_created
+                chats_created += 1
+                return Chat(chats_created)
+
+            with patch("chatgemini.webapi_backend._start_isolated_chat", side_effect=start_chat):
+                first_text, first_state = await instance._generate("first", "gemini-3.5-flash")
+                self.assertEqual(first_text, "answer-1")
+                second = asyncio.create_task(
+                    instance._generate("second", "gemini-3.5-flash", first_state)
+                )
+                await asyncio.sleep(0.01)
+                self.assertFalse(second_started.is_set())
+                release_tail.set()
+                second_text, _ = await second
+                self.assertEqual(second_text, "answer-2")
+                self.assertTrue(second_started.is_set())
+                await asyncio.gather(*list(instance._background_tasks))
+
+        asyncio.run(scenario())
 
 
 class StoreTests(unittest.TestCase):
